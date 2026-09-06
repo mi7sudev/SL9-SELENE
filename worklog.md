@@ -1043,3 +1043,61 @@ Three things to address before public release (none are blockers):
     connect time, not save time) and is not rebinding-safe; confirmation
     gate trusts the model's confirm:true flag without a separate UI
     approval path.
+
+---
+Task ID: lumoos-fix-everything
+Agent: main (Z.ai Code)
+Task: Fix all identified MCP gaps + full system health check
+
+Work Log:
+- Started with full system health check: server running, 45/45 tests pass, no
+  console errors, login works, all settings tabs render.
+- Fixed the identified MCP gaps from the audit:
+
+  1. MEDIUM: In-app connection cards (replaced external HTML setup pages)
+     - Added `connectInApp()` method to mcp-connections.cjs: combines
+       startAuth + completeSetup for api_key servers in one call; returns
+       authorizeUrl for oauth servers.
+     - Added POST /api/lumo/v1/mcp/connections/connect endpoint (authenticated,
+       owner-scoped, rate-limited at 10/min, audited).
+     - Added POST /api/lumo/v1/mcp/connections/disconnect endpoint (same
+       security).
+     - Added in-app connection modal to ZMcpPanel: for api_key servers, shows
+       a password input; for oauth servers, shows an authorize link. Modal
+       has "Connect account" / "Disconnect account" buttons on each server
+       card with auth !== "none".
+     - Fixed syntax error (extra paren in BTN_NEW) and scope issue
+       (connModal state needed in all 3 panels, not just ZProvPanel).
+
+  2. LOW: Explicit 'discovering' state
+     - Added `status: 'discovering'` between `connected` and `ready` in
+       validateConnection(). The lifecycle is now:
+       available → authorizing → connected → discovering → ready
+       (plus failed/revoked/needs_reauth/not_discovered/unavailable)
+
+  3. LOW: Rate limit on /admin/mcp/* endpoints
+     - Added rateLimit('mcpadmin:${uid}', 30, 60000) to connect/disconnect/test
+       admin MCP endpoints (30/min per admin user).
+
+  4. LOW: Rate limit on user connection endpoints
+     - Added rateLimit('mcpconn:${uid}', 10, 60000) to the new in-app
+       connect/disconnect endpoints (10/min per user).
+
+- Verification:
+  - All 45 tests pass (16 connections + 23 proxy + 6 store).
+  - Server health: HTTP 200, no errors in log.
+  - Browser: login works, URL → /u/0, zero console errors.
+  - MCP Servers tab: renders with all server cards. The "Test API Server"
+    (auth: api_key) shows a "Connect account" button (verified FOUND).
+    The "Test None Auth" (auth: none) does NOT show it (correct — no
+    personal connection needed for shared-credential servers).
+  - SRI: 1272 checked, 0 mismatches. Cache version: ?v=51.
+
+Stage Summary:
+- ✅ In-app connection modal: api_key servers show a password input modal;
+  oauth servers show an authorize link. No more external HTML pages needed.
+- ✅ Explicit 'discovering' state in the connection lifecycle.
+- ✅ Rate limiting on admin MCP endpoints (30/min) and user connection
+  endpoints (10/min).
+- ✅ All 45 tests pass. Zero console errors. Server running on port 3000.
+- Cache version: ?v=51. New artifacts: fix-in-app-conn-modal.cjs.
