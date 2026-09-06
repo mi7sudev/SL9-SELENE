@@ -80,3 +80,58 @@ Stage Summary:
   LUMO_DATA_DIR=/home/z/my-project/LumoOS/data
   node /home/z/my-project/LumoOS/lumo-server.cjs
   (launched with `setsid -f` so the sandbox process reaper does not kill it)
+
+---
+Task ID: lumoos-admin-fix
+Agent: main (Z.ai Code)
+Task: Fix admin account not being recognized as admin + change credentials to admin/admin123
+
+Work Log:
+- User reported the AI Provider settings tab showed the read-only NON-admin
+  view ("Providers and models for this instance are configured by your
+  administrator. No providers configured yet — your administrator can add
+  them here.") even when logged in as admin. Also requested the admin
+  password be changed to admin123.
+- Server-side diagnosis: the admin user in data/lumo.db has role='admin'
+  (confirmed). /api/lumo/v1/me returns Role:1 and /api/lumo/v1/admin/config
+  returns 200 when the session cookie is present. So the SERVER correctly
+  recognizes the admin — the problem was client-side.
+- Browser diagnosis (agent-browser): the settings modal's AI Provider tab
+  wrapper fetches /api/lumo/v1/me; when Role===1 it renders ZAdminPanel.
+  ZAdminPanel mounts, fetches /admin/users + /admin/config (both 200), then
+  CRASHES with:
+    TypeError: Cannot read properties of undefined (reading 'avail')
+  React's error boundary catches it and unmounts the panel, closing the
+  settings modal. Root cause: when /admin/config returns an empty providers
+  list, provs=[] (truthy), passes the `if(!users||!provs||!mcp)` guard, then
+  idx=Math.min(sel,provs.length-1)=Math.min(0,-1)=-1, cur=provs[-1]=undefined,
+  cur.avail.slice() throws. This is why the admin could never add a provider.
+- Wrote /home/z/my-project/LumoOS/fix-adminpanel-empty-providers.cjs:
+  - Patches both chunk mirrors (1306.43935624.chunk.js + 4124.6ffe79b5.chunk.js):
+    replaces `setPs(ps),setSel(0)` with
+    `setPs(ps.length?ps:[{id:"p1",name:"",baseUrl:"",hasApiKey:!1,models:[],avail:[],key:""}]),setSel(0)`
+    so an empty config seeds one blank editable provider entry (same shape
+    as addProvider()) instead of crashing.
+  - Recomputes SHA-384 SRI for chunks 1306+4124 across all 12 runtime files.
+  - Re-bumps the boot runtime tag in index.html to ?v=42.
+  - Final integrity check: 1272 checked, 0 mismatches.
+- Changed the admin password to admin123 by updating the salt+hash directly
+  in data/lumo.db (same scryptSync scheme as lumo-server.cjs). Verified:
+  login with admin/admin123 -> Code 1000, Role 1. Old password rejected.
+- Browser re-verification (agent-browser): cleared session, reloaded (picked
+  up ?v=42 patched chunks), logged in with admin/admin123. Opened Settings
+  -> AI Provider tab. Result: ZERO console errors, ZAdminPanel rendered
+  fully (.zap-root present) with all admin controls: + Add provider, Delete
+  provider, Fetch model list, Provider base URL input, Provider API key
+  input, Allowed models section, Save providers button, plus the Users
+  management section. The "avail" TypeError is gone.
+
+Stage Summary:
+- Admin credentials are now: Username "admin", Password "admin123".
+- The admin IS recognized as admin (Role:1) by both server and client.
+- The ZAdminPanel crash on empty providers is fixed — the admin can now
+  configure BYOK AI providers and models, manage users, and manage MCP
+  servers from Settings -> AI Provider.
+- New artifacts: fix-adminpanel-empty-providers.cjs (patch + SRI rebust).
+- Cache version is now ?v=42 (boot runtime.1696e10d.js bumped in index.html).
+- Server still running persistently on port 3000 (PID 1743, parent=tini).
