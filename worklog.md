@@ -545,3 +545,59 @@ Stage Summary:
 - ✅ Model rows show a context badge (e.g., "131K", "200K") when metadata is set.
 - New artifacts: fix-context-usage.cjs, fix-prov-panel-return.cjs.
 - Cache version: ?v=46. Server running on port 3000 (PID 14165).
+
+---
+Task ID: lumoos-icons-dedup-borders
+Agent: main (Z.ai Code)
+Task: Fix duplicate Add Model button, add borders to model rows, replace emoji icons with native Lucide icons, audit modal UI consistency
+
+Work Log:
+- User reported: duplicate Add Model button, model list has no border, emoji
+  icons (🔌 ✎ 🗑) inconsistent with the native Lucide icon system.
+
+- Investigation:
+  - Duplicate Add Model: one button in the Models header (next to "N total")
+    AND a standalone one below the model list — both called openAddModel.
+  - Model rows: the CSS had been stripped to borderless (.zap-mrow had
+    border:0, background:transparent) in a previous consistency pass.
+  - Icons: the test/edit/delete buttons used Unicode emoji (🔌 ✎ 🗑) and the
+    modal close used ✕ — none matched the native Lucide icon system (H.z
+    component with name:"Pencil", name:"Trash2", etc.).
+
+- Fixes applied (fix-icons-dedup.cjs + fix-admin-ui-split.cjs):
+  1. Removed the duplicate standalone "+ Add model" button below the model
+     list. Only the one in the Models header (next to "N total") remains.
+  2. Restored borders on .zap-mrow: 1px solid var(--border-weak),
+     border-radius:8px, background:var(--background-norm), padding:8px 12px.
+  3. Added %ICON% alias token (H — the Lucide icon component used by the
+     native n8 SectionHeader) to the ALIASES and fillTokens.
+  4. Replaced all emoji icons with native Lucide icons via (0,a.jsx)(%ICON%.z,
+     {name:"...",size:16}):
+     - Test connection: 🔌 → Zap (testing state: ⏳ → Hourglass)
+     - Edit: ✎ → Pencil
+     - Delete: 🗑 → Trash2
+     - Modal close: ✕ → X (size:20)
+     - Test result OK: ✓ → Check (size:12) + text
+     - Test result FAIL: ✗ → X (size:12) + text
+  5. Added .zap-ibtn:disabled style for the testing state.
+  6. Bumped cache version to ?v=47.
+
+- Browser verification (agent-browser, fresh session):
+  - Add model button count: 1 (duplicate removed) ✅
+  - Model row border: "1px solid rgb(234, 231, 228)" + white bg + 8px radius ✅
+  - Icon buttons: all 3 (test/edit/delete) have hasSvg:true, no emoji text ✅
+  - Modal close button: hasSvg:true (Lucide X) ✅
+  - Test result pill: hasSvg:true (Lucide Check) + "Connected!" text ✅
+  - Modal fields: Model ID, Context window, Max output tokens, Input types
+    (Text/Image/Video/PDF), Output types (Text) — all present ✅
+  - Zero console errors ✅
+
+Stage Summary:
+- ✅ Duplicate Add Model button removed (now only 1, in the Models header).
+- ✅ Model rows have visible borders (1px solid var(--border-weak), 8px radius).
+- ✅ All action icons are now native Lucide SVG icons (Zap, Pencil, Trash2, X,
+  Check, Hourglass) — consistent with the rest of the Lumo UI.
+- ✅ Modal close button uses Lucide X icon.
+- ✅ Test result pills use Lucide Check (green) / X (red) + text.
+- Cache version: ?v=47. Server running on port 3000 (PID 14165).
+- New artifact: fix-icons-dedup.cjs.
