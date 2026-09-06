@@ -169,3 +169,75 @@ Stage Summary:
 - Cache-busting is already in place: index.html references ?v=42, and the
   chunk URLs in the runtime were bumped to ?v=42, so a cache clear is a
   one-time action — subsequent loads will use the new versions.
+
+---
+Task ID: lumoos-admin-split
+Agent: main (Z.ai Code)
+Task: Add edit/test connection per model; separate Users and MCP Servers from the AI Provider tab
+
+Work Log:
+- User uploaded a screenshot of "Zcode Model settings" showing per-provider
+  edit/test-connection and per-model edit/delete buttons. Requested the same
+  on LumoOS, plus separating Users and MCP Servers into their own tabs (not
+  on the AI Provider tab).
+- Analyzed the reference image via VLM: provider-level has Edit (pencil),
+  Enable/Disable, Delete (trash); model-level has link/edit/delete per row.
+- Examined the current dist structure:
+  - Settings nav array: l_ (1306) / lo (4124), entries like
+    {id:"ai-provider",icon:"Cpu",getText:...`AI Provider`,guest:!0}
+  - Settings switch: "ai-provider"===s&&(0,a.jsx)(la2,{}) (1306) /
+    nG2 (4124)
+  - The old ZAdminPanel was one giant component with providers+users+mcp
+    injected as a block (var ZADMIN_CSS=...;let ZAdminPanel=...;let la2=...;)
+    right before `let la=()=>{` (the original read-only view).
+- Wrote /home/z/my-project/LumoOS/fix-admin-ui-split.cjs:
+  1. Removes the old injected block entirely (33959 chars).
+  2. Injects new block (39186 chars) with THREE separate components:
+     - ZProvPanel: AI providers only. NEW features:
+       * "Test connection" button — calls /api/lumo/v1/admin/models, shows
+         "Connection OK — N models found" (green) or "Connection failed — error" (red)
+       * Per-model rows with ✎ edit (inline rename via input+Enter) and 🗑 delete
+       * Fetch model list now adds ALL found models to the list (not just avail)
+       * Kept: Add provider, Delete provider, Save, Add model manually
+     - ZUsersPanel: users only (role dropdown, enable/disable, delete)
+     - ZMcpPanel: MCP servers only (add/edit/delete/connect/disconnect/test,
+       import/export, tool permission toggles)
+  3. Three admin-role wrappers (la2/la3/la4 for 1306, nG2/nG3/nG4 for 4124):
+     - la2/nG2 → ai-provider tab → ZProvPanel (admin) or read-only catalog (non-admin)
+     - la3/nG3 → users tab → ZUsersPanel (admin) or "admin only" notice
+     - la4/nG4 → mcp-servers tab → ZMcpPanel (admin) or "admin only" notice
+  4. Adds two nav entries to the l_/lo array after ai-provider:
+     {id:"users",icon:"Users",...`Users`,guest:!1}
+     {id:"mcp-servers",icon:"Wrench",...`MCP Servers`,guest:!1}
+  5. Adds two switch cases:
+     "users"===s&&(0,a.jsx)(la3,{})
+     "mcp-servers"===s&&(0,a.jsx)(la4,{})
+  6. Recomputes SRI for chunks 1306+4124 across all 12 runtimes, bumps to ?v=43.
+- Ran the patch: both chunks patched, 12 runtimes updated, SRI 0 mismatches.
+- Browser verification (agent-browser, fresh session):
+  - Login admin/admin123, no console errors, loaded 1306?v=43.
+  - Settings tabs now: Account, Personalization, AI Provider, Users, MCP
+    Servers, General, Appearance, About (8 tabs, 3 new admin sections).
+  - AI Provider tab: ONLY providers/models. Has + Add provider, Delete
+    provider, Fetch model list, **Test connection**, Save providers. Model
+    rows show model-id + ✎ edit + 🗑 delete. NO Users section, NO MCP section.
+  - Test connection: clicked → "Connection OK — 81 models found" (green).
+    The saved NVIDIA provider's API key was valid.
+  - Model edit: clicked ✎ on first model → inline input appeared → typed
+    new name → clicked ✓ → model renamed successfully.
+  - Model delete: clicked 🗑 on second model → confirmed → model removed.
+  - Users tab: ONLY users. Shows "Manage accounts, roles, and access" +
+    admin user row with role dropdown. NO providers, NO MCP.
+  - MCP Servers tab: ONLY MCP. Shows "Model Context Protocol servers" +
+    Add server/Import/Export + "No MCP servers configured yet". NO
+    providers, NO users.
+  - Screenshots: lumo-ai-provider-v2.png, lumo-mcp-tab.png, lumo-final-3tabs.png
+
+Stage Summary:
+- The admin settings now have 3 separate tabs: AI Provider (providers/models
+  only), Users (user management), MCP Servers (MCP management).
+- AI Provider tab has Test Connection (✓/✗ feedback) and per-model
+  Edit (inline rename) + Delete, matching the Zcode reference UI.
+- Cache version bumped to ?v=43. Server still running on port 3000.
+- New artifact: fix-admin-ui-split.cjs (idempotent — removes old block
+  before injecting new one, so it can be re-run after upstream rebuilds).
