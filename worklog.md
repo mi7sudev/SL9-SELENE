@@ -456,3 +456,92 @@ Stage Summary:
 - ✅ Regenerate "Describe desired changes...": custom user text. WORKS.
 - All features follow the Proton Lumo architecture and work end-to-end with
   the admin-configured BYOK provider. No fixes needed.
+
+---
+Task ID: lumoos-model-modal-context-projects
+Agent: main (Z.ai Code)
+Task: Add model settings modal (context window, max output, input/output types), make context usage panel model-aware, verify Projects sidebar
+
+Work Log:
+- User requested 3 things:
+  1. When clicking Add model or editing a model, a modal should appear with
+     model configuration (context window, max output tokens, input/output types)
+     matching the Zcode reference screenshot.
+  2. The context usage panel (right side, "Show knowledge panel") should detect
+     the current model and show its context window instead of hardcoded 128K.
+  3. Projects sidebar section missing.
+
+- Investigation findings:
+  - Context usage: hardcoded MAX_CONTEXT: 128000 in chunk 9333 (el.Ph.MAX_CONTEXT).
+    The context usage component in 1306/4124 reads maxTokens:a=el.Ph.MAX_CONTEXT.
+  - Projects sidebar: ProjectsSidebarSection IS rendered (in chunk 6845), loaded
+    by the boot runtime. Verified it shows "Projects" + "No projects yet" when
+    logged in. The user likely saw a stale/cached version.
+  - Model metadata: the admin config stored models as an array of strings only,
+    with no per-model metadata (context window, etc.).
+
+- Backend changes (lumo-server.cjs):
+  - normalizeAdminConfig: added modelMeta field per provider — a map of
+    modelId → {contextWindow, maxOutput, inputTypes, outputTypes}. Normalized
+    on read (numbers validated, arrays filtered).
+  - /api/lumo/v1/catalog: now returns ModelMeta (flattened across providers).
+  - /api/lumo/v1/admin/config GET: returns modelMeta per provider.
+  - /api/lumo/v1/admin/config PUT: accepts and stores modelMeta per provider
+    (falls back to prev.modelMeta if not provided).
+  - Restarted server (PID 14165).
+
+- Frontend changes:
+  1. ZProvPanel (fix-admin-ui-split.cjs):
+     - Replaced inline edit (editIdx/editVal) with a modal state (modelModal).
+     - Replaced "Add a model manually" input with "+ Add model" button.
+     - The ✎ edit button now opens a modal pre-filled with the model's metadata.
+     - The modal has: Model ID, Context window (tokens), Max output tokens,
+       Input types (Text locked, Image, Video, PDF checkboxes), Output types
+       (Text locked), Cancel / Save buttons.
+     - saveModelModal: adds/updates the model ID + stores metadata in modelMeta.
+     - Model rows now show a context badge (e.g., "131K", "200K") if the model
+       has a contextWindow set.
+     - saveAll: includes modelMeta in the PUT request.
+     - load: reads modelMeta from the GET response.
+
+  2. Context usage panel (fix-context-usage.cjs):
+     - Patched maxTokens:a=el.Ph.MAX_CONTEXT →
+       maxTokens:a=(window.__lumoModelContext||el.Ph.MAX_CONTEXT) in 1306+4124.
+     - Patched the catalog fetch in 4206 to store ModelMeta in
+       window.__lumoModelMeta and set window.__lumoModelContext based on the
+       currently selected model (from localStorage BYOK config).
+     - When no metadata is set for a model, falls back to 128000 (default).
+
+- Cache version bumped to ?v=46. SRI: 0 mismatches (1272 checked).
+
+- Browser verification (agent-browser, fresh session):
+  1. Model modal: Clicked "+ Add model" → modal appeared with all fields
+     (Model ID, Context window, Max output tokens, Input types: Text/Image/
+     Video/PDF, Output types: Text). Filled in "test/context-test-model",
+     128000, 4096. Saved → model added to list with "128K" badge.
+  2. Edit model: Clicked ✎ on the test model → modal opened pre-filled
+     (id="test/context-test-model", context=128000, maxOutput=4096). Changed
+     context to 200000. Saved → badge updated to "200K". Saved providers →
+     "Saved — users now see these providers and models."
+  3. Context-aware tokens: Selected the test model (contextWindow=200000),
+     sent a message, opened "Show knowledge panel" → context usage showed
+     "3 / 200.0K tokens (0%)" (model's context window, not hardcoded 128K).
+  4. Fallback: Switched to NVIDIA model with no metadata → context usage
+     fell back to 128.0K (default). Set contextWindow=131072 on the NVIDIA
+     model → badge showed "131K" (Math.round).
+  5. Projects sidebar: "YES" — present and working.
+  6. Catalog endpoint: returns ModelMeta correctly:
+     {"test/context-test-model":{"contextWindow":200000,"maxOutput":4096,...}}
+
+Stage Summary:
+- ✅ Model settings modal: Add/Edit model opens a modal with Model ID, Context
+  window, Max output tokens, Input types (Text/Image/Video/PDF), Output types
+  (Text). Matches the Zcode reference screenshot.
+- ✅ Context-aware token limit: The context usage panel now reads the selected
+  model's context window from the catalog's ModelMeta. Shows "200.0K" for a
+  model with contextWindow=200000, "131K" for 131072, falls back to 128K for
+  models without metadata.
+- ✅ Projects sidebar: Already present and working (shows Projects + list).
+- ✅ Model rows show a context badge (e.g., "131K", "200K") when metadata is set.
+- New artifacts: fix-context-usage.cjs, fix-prov-panel-return.cjs.
+- Cache version: ?v=46. Server running on port 3000 (PID 14165).
