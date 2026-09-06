@@ -241,3 +241,69 @@ Stage Summary:
 - Cache version bumped to ?v=43. Server still running on port 3000.
 - New artifact: fix-admin-ui-split.cjs (idempotent — removes old block
   before injecting new one, so it can be re-run after upstream rebuilds).
+
+---
+Task ID: lumoos-per-model-test
+Agent: main (Z.ai Code)
+Task: Move Test Connection from provider-level to per-model (before the pencil/edit button), matching the Zcode reference screenshot
+
+Work Log:
+- User uploaded a second screenshot showing the desired layout: each model row
+  has [model name] → [test/plug icon] → [pencil/edit] → [trash/delete], with a
+  green "Connected!" or red "Connection failed" pill BELOW the row after testing.
+  The previous implementation had Test connection at the provider level.
+- Backend: added /api/lumo/v1/admin/test-model endpoint in lumo-server.cjs:
+  - New proxyTestModel(res, logLabel, baseUrl, apiKey, model) function that
+    sends a minimal chat completion (model, messages:[{role:'user',content:'hi'}],
+    max_tokens:1, stream:false) to {baseUrl}/chat/completions.
+  - Returns {Code:1000, ok:true, model, status} on 2xx, or
+    {Code:1000, ok:false, model, status, error:"<message>"} on failure.
+    Extracts human-readable error from upstream JSON (error.message / message).
+  - 15s timeout; AbortError → "Request timed out (15s)".
+  - Key resolution: request apiKey wins, else saved provider's key (by
+    providerId, else by matching baseUrl). Also falls back to the saved
+    provider's baseUrl when the request omits it, so {providerId, model} alone
+    is enough.
+  - Admin-gated (requireAdmin).
+- Restarted the server (kill old PID, setsid -f node lumo-server.cjs). Verified:
+  real model → ok:true,status:200; fake model → ok:false,status:404,error:"HTTP 404".
+- Frontend: updated fix-admin-ui-split.cjs ZProvPanel:
+  - Replaced provider-level test state (testing bool) with per-model state:
+    testingModel (model id being tested, ""=none) + testRes (map: model id →
+    {testing?, ok?, msg}).
+  - Removed the testConn function and the provider-level "Test connection"
+    button from the button bar (kept "Fetch model list" + its help text).
+  - Added testModel(mi) function: calls /admin/test-model with
+    {providerId, baseUrl, apiKey, model}, updates testRes[modelId].
+  - Restructured each model row into a .zap-mitem (flex column) containing:
+    1. The .zap-mrow with: model-id span → 🔌 test button → ✎ edit → 🗑 delete
+       (test button shows ⏳ while testing that model)
+    2. A result pill below the row (only when not testing): green "✓ Connected!"
+       or red "✗ Connection failed: <error>" (with title attr for full text).
+  - Added CSS: .zap-mitem, .zap-test, .zap-test-ok (green border/text),
+    .zap-test-fail (red border/text).
+  - Bumped cache version to ?v=44.
+- Ran the patch: both chunks patched, 12 runtimes updated, SRI 0 mismatches.
+- Browser verification (agent-browser, fresh session):
+  - Login admin/admin123, opened Settings → AI Provider. Zero console errors.
+  - Provider-level "Test connection" button: REMOVED (confirmed).
+  - Each model row button order: [Test connection, Edit, Delete] — test BEFORE
+    edit, exactly as the reference screenshot shows.
+  - Tested model 1 (nvidia/nemotron-3.5-lightning-30b-a3b): clicked 🔌 →
+    green pill "✓ Connected!" appeared below the row.
+  - Tested model 2 (nvidia/nemotron-3-ultra-550b-a55b): green pill "✓ Connected!".
+  - Added a fake model (fake/nonexistent-model), tested it: red pill
+    "✗ Connection failed: HTTP 404".
+  - All 3 pills visible simultaneously (2 green, 1 red), each below its model.
+  - Screenshots: lumo-per-model-test.png, lumo-test-mixed.png, lumo-per-model-final.png.
+
+Stage Summary:
+- The Test Connection button is now PER-MODEL, positioned before the edit
+  (pencil) button in each model row: [model name] [🔌 test] [✎ edit] [🗑 delete].
+- Testing sends a real minimal chat completion to the provider for that
+  specific model and shows a green "Connected!" or red "Connection failed: …"
+  pill below the row.
+- The provider-level Test connection button has been removed.
+- Cache version is now ?v=44. Server running on port 3000 (PID 7429).
+- Backend endpoint: POST /api/lumo/v1/admin/test-model {providerId, model,
+  baseUrl?, apiKey?} → {ok, model, status?, error?}.
