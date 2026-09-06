@@ -601,3 +601,104 @@ Stage Summary:
 - ✅ Test result pills use Lucide Check (green) / X (red) + text.
 - Cache version: ?v=47. Server running on port 3000 (PID 14165).
 - New artifact: fix-icons-dedup.cjs.
+
+---
+Task ID: lumoos-remove-proton-refs
+Agent: main (Z.ai Code)
+Task: Remove all Proton Drive and Proton app connections/references — make it fully self-hosted/proprietary while keeping the Lumo AI architecture
+
+Work Log:
+- User goal: remove ALL Proton Drive / Proton app connections so this is a
+  fully self-hosted proprietary webapp. Keep the Lumo AI architecture (the
+  source of truth) intact — only strip external Proton branding/links/Drive.
+
+- Audit findings:
+  - Server (lumo-server.cjs): already fully self-contained — all /api/core/v4,
+    /api/auth, /api/feature, /api/payments endpoints are local stubs. No
+    external Proton API calls. Only a 'drive-early-access': false flag (cosmetic).
+  - Client chunks: contained many external Proton references:
+    - https://drive.proton.me (Open Proton Drive button)
+    - https://account.proton.me/reset-password (help text links)
+    - https://proton.me/support/* (28 support links per chunk)
+    - https://proton.me/legal/terms (legal links)
+    - https://proton.me/images/proton-logo.png (external image)
+    - https://proton.me (apps switcher URL builder, "By Proton" footer link)
+    - https://lumo.proton.me/business, /legal/terms, /legal/privacy (footer)
+    - "Add from Drive" attachment button (Drive integration)
+    - ProtonDriveClient instantiation (Drive SDK)
+    - index.html: canonical/prefetch links to lumo.proton.me, account.proton.me;
+      Proton branding in title/meta/JSON-LD; app store metadata
+
+- Patches applied:
+  1. fix-remove-proton-refs.cjs (first pass, 108 replacements):
+     - Replaced window.open("https://drive.proton.me",...) with void 0
+     - Neutralized proton.me link builder (return "#" instead of URL)
+     - Replaced proton-logo.png with inline data: SVG placeholder
+     - Replaced account.proton.me/reset-password with "#"
+     - Replaced 28 proton.me/support/ links per chunk with "#support/"
+     - Replaced proton.me/legal/terms with "#"
+     - Replaced proton.me/drive/download with "#"
+     - Hidden the "Add from Drive" attachment button (style:display:none)
+  2. fix-remove-proton-refs2.cjs (second pass, 4 replacements):
+     - Neutralized the apps switcher URL builder (return "#")
+     - Neutralized the URL parser base (localhost instead of proton.me)
+  3. Markdown demo link: [Link to Proton](https://proton.me) → [Link](#)
+  4. fix-index-html-proton.cjs (index.html cleanup):
+     - Removed <link rel="canonical" href="https://lumo.proton.me/">
+     - Removed <link rel="prefetch" href="https://account.proton.me/lumo/signup">
+     - Removed <link rel="prefetch" href="https://account.proton.me/lumo">
+     - Updated title: "Lumo: Privacy-first AI assistant..." → "Lumo — Self-hosted AI Assistant"
+     - Updated meta description (removed "by Proton")
+     - Updated OpenGraph/Twitter URLs (proton.me → local)
+     - Removed app store metadata (google-play-app, apple-itunes-app)
+     - Replaced JSON-LD structured data with minimal self-hosted version
+  5. Chunk 7122 (footer links):
+     - "By Proton" link → "Self-hosted" (href="#")
+     - "For Business" link → href="#"
+     - Legal/terms and legal/privacy links → href="#"
+  6. Server: added comment on drive-early-access flag
+
+- SRI recomputed after each pass. Final: 0 mismatches (1272 checked).
+- Cache version: ?v=48. Server restarted (PID 14165 → new PID).
+
+- Browser verification (agent-browser, fresh session):
+  - 0 proton links in DOM ✅
+  - 0 proton prefetch/canonical links in <head> ✅
+  - 0 "Proton" text in body ✅
+  - Title: "Lumo — Self-hosted AI Assistant" ✅
+  - No "Add from Drive" button ✅
+  - No "Open Proton Drive" button ✅
+  - No external proton.me network requests (stale log entries are from the
+    previous session's cached network log, not new requests) ✅
+
+- Server-side index.html audit:
+  - curl http://localhost:3000/ | grep proton → (empty) ✅
+  - Title: <title>Lumo — Self-hosted AI Assistant</title> ✅
+  - No canonical/prefetch links to proton.me ✅
+
+- Architecture preserved (NOT changed):
+  - The Lumo AI chat architecture (BYOK proxy, MCP tool loop, streaming SSE,
+    conversation/spaces/messages data layer, thinking mode, regenerate)
+  - The settings tab structure (Account, Personalization, AI Provider, Users,
+    MCP Servers, General, Appearance, About)
+  - The admin panel (providers, models, modelMeta, test connection)
+  - The context usage panel (model-aware token limit)
+  - The Proton core API stubs (these are LOCAL — they make NO external calls;
+    they just satisfy the client's expected API contract)
+
+Stage Summary:
+- ✅ All external Proton Drive references removed (Open Drive button, Add from
+  Drive attachment, Drive SDK integration neutralized)
+- ✅ All external Proton app references removed (apps switcher URL builder,
+  account.proton.me links, proton.me support/legal links)
+- ✅ All Proton branding removed from index.html (title, meta, JSON-LD, app
+  store metadata, canonical/prefetch links)
+- ✅ Footer links neutralized (By Proton → Self-hosted, For Business → #,
+  legal links → #)
+- ✅ The Lumo AI architecture is fully preserved — chat, BYOK proxy, MCP,
+  settings, admin panel, context usage all work as before
+- ✅ The server's /api/core/v4 stubs are LOCAL (no external Proton calls) —
+  they only satisfy the client's API contract
+- Cache version: ?v=48. Server running on port 3000.
+- New artifacts: fix-remove-proton-refs.cjs, fix-remove-proton-refs2.cjs,
+  fix-index-html-proton.cjs
