@@ -702,3 +702,37 @@ Stage Summary:
 - Cache version: ?v=48. Server running on port 3000.
 - New artifacts: fix-remove-proton-refs.cjs, fix-remove-proton-refs2.cjs,
   fix-index-html-proton.cjs
+
+---
+Task ID: lumoos-fix-white-screen
+Agent: main (Z.ai Code)
+Task: Fix white screen caused by Proton reference removal patch
+
+Work Log:
+- After the Proton reference removal patch (?v=48), the page turned white —
+  the React app failed to mount (app-root had 0 children, loaded the
+  "unsupported browser" fallback chunk).
+- Root cause: the URL builder function u(e) in chunk 9333 was patched to
+  return "#" instead of `https://proton.me${e}`. But the function's return
+  value is passed to `new URL()` in several places, and `new URL("#")` throws
+  TypeError: Invalid URL — crashing the app during initialization.
+- The same issue existed in the apps switcher URL builder (export "C") in
+  chunks 1306, 4124, 6991 — also patched to return "#".
+- Fix: replaced all `return"#"` with `return window.location.origin+e` (or
+  `return o.A.location.origin+e` in 9333 where `o.A.location` is the app's
+  location reference). This returns a valid absolute URL pointing to the
+  local server, so `new URL()` succeeds and links stay local (no external
+  Proton navigation).
+- Recomputed SRI for all 4 modified chunks (1306, 4124, 6991, 9333), bumped
+  cache version to ?v=49. Integrity check: 1272 checked, 0 mismatches.
+- Browser verification: login page renders ("Sign in to Lumo" + "Self-hosted
+  instance" text), login succeeds, URL → /u/0, main chat UI renders (New
+  chat, Projects, Favorites, Recent, Settings all visible). Zero console
+  errors (except the pre-existing benign "Error pulling spaces").
+
+Stage Summary:
+- White screen fixed. The app loads and works correctly at ?v=49.
+- The Proton reference removal is still in effect — no external proton.me
+  URLs remain. The URL builder now returns local URLs (window.location.origin)
+  instead of either proton.me or "#".
+- Cache version: ?v=49. Server running on port 3000.
