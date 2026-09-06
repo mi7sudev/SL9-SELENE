@@ -1175,3 +1175,483 @@ Stage Summary:
   viewport (375x812).
 - ✅ All 45 tests pass. Zero console errors. Cache version: ?v=58.
 - New artifact: lumo-mic-inject.js (the injection script).
+
+---
+Task ID: ANDROID-MIC-ANALYSIS
+Agent: subagent (general-purpose)
+Task: Analyze the Proton Lumo native Android app (android-lumo) to understand mic/voice input and prompt bar implementation
+
+Work Log:
+
+Scope of files reviewed
+- app/src/main/java/me/proton/android/lumo/speech/SpeechRecognitionManager.kt
+- app/src/main/java/me/proton/android/lumo/speech/SpeechViewModel.kt
+- app/src/main/java/me/proton/android/lumo/speech/SpeechRepository.kt
+- app/src/main/java/me/proton/android/lumo/speech/recognizer/LumoSpeechRecognizer.kt
+- app/src/main/java/me/proton/android/lumo/speech/recognizer/VoskSpeechRecognizer.kt
+- app/src/main/java/me/proton/android/lumo/speech/recognizer/android/AndroidSpeechRecognizer.kt
+- app/src/main/java/me/proton/android/lumo/speech/recognizer/android/GoogleSpeechRecognizer.kt
+- app/src/main/java/me/proton/android/lumo/speech/recognizer/android/OnDeviceSpeechRecognizer.kt
+- app/src/main/java/me/proton/android/lumo/di/SpeechModule.kt
+- app/src/main/java/me/proton/android/lumo/di/SpeechBinder.kt
+- app/src/main/java/me/proton/android/lumo/ui/components/waveform/{MicVisualizer,VoskAudioWaveform,OnDeviceAudioWaveform}.kt
+- app/src/main/java/me/proton/android/lumo/ui/components/speech/{SpeechSheet,SpeechInputContent}.kt
+- app/src/main/java/me/proton/android/lumo/ui/components/ChatScreen.kt
+- app/src/main/java/me/proton/android/lumo/webview/{JsInjector,WebAppInterface,LumoWebClient,WebViewScreen}.kt
+- app/src/main/java/me/proton/android/lumo/{MainActivity,MainActivityViewModel}.kt
+- app/src/main/java/me/proton/android/lumo/navigation/NavRoutes.kt
+- app/src/main/res/values/strings.xml (speech_* / permission_mic_rationale keys)
+
+Note on path drift
+- The task asked for `speech/recognizer/AndroidSpeechRecognizer.kt` but the
+  file actually lives at `speech/recognizer/android/AndroidSpeechRecognizer.kt`
+  (the two Android-native recognizers were moved into an `android/` subpackage).
+  `AndroidSpeechRecognizer` is now an abstract base; the concrete
+  implementations are `GoogleSpeechRecognizer` and `OnDeviceSpeechRecognizer`.
+
+============================================================
+1. Speech recognition architecture
+============================================================
+
+Layered design (recognizer → manager → viewmodel → repository → web bridge):
+
+  LumoSpeechRecognizer (interface)
+   ├── AndroidSpeechRecognizer (abstract, in android/ subpackage)
+   │     ├── GoogleSpeechRecognizer  -> SpeechRecognizer.createSpeechRecognizer(ctx)
+   │     └── OnDeviceSpeechRecognizer (API≥31) -> createOnDeviceSpeechRecognizer(ctx)
+   └── VoskSpeechRecognizer          -> org.vosk SpeechService + bundled model-en-us
+
+Three engines, sealed in SpeechRecognitionManager.Engine { OnDevice, GoogleCloud, Vosk }.
+
+Engine selection (SpeechRecognitionManager.chooseInitialEngine):
+  - If SDK_INT >= S AND SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx)
+    -> start with OnDeviceSpeechRecognizer.
+  - Else -> start with VoskSpeechRecognizer.
+  - GoogleSpeechRecognizer is only ever reached via the fallback path below.
+
+Fallback chain (SpeechRecognitionManager.wrapListener.onError):
+  When a recognizer reports an *initialisation* error (isInitialisation=true),
+  the manager transparently switches the engine, in this order:
+      OnDevice  ->  Vosk  ->  GoogleCloud  ->  bubble error to UI
+  `switch()` destroys the current recognizer, swaps `current`, re-attaches the
+  listener, fires `listener.switched()` (so the VM can update the status pill)
+  and calls `current.startListening()` to resume. So the user keeps talking
+  through the fallback. The VM is told via `isVosk` in SpeechUiState so the
+  correct waveform is rendered.
+
+  "Initialisation" errors per engine (AndroidSpeechRecognizer.fatalErrors):
+    common: ERROR_AUDIO, ERROR_CLIENT, ERROR_RECOGNIZER_BUSY,
+            ERROR_INSUFFICIENT_PERMISSIONS
+    OnDeviceSpeechRecognizer also treats as fatal:
+            ERROR_TOO_MANY_REQUESTS, ERROR_LANGUAGE_NOT_SUPPORTED,
+            ERROR_LANGUAGE_UNAVAILABLE
+  Non-fatal errors (e.g. ERROR_NO_MATCH) trigger `listener.restart()` which
+  loops back into `onStartVoiceEntryRequested()` -> continuous dictation.
+
+AndroidSpeechRecognizer details:
+  - Builds RecognizerIntent.ACTION_RECOGNIZE_SPEECH with
+    LANGUAGE_MODEL_FREE_FORM, EXTRA_PARTIAL_RESULTS=true, locale from
+    Locale.getDefault() (language+country tag; falls back to language-only
+    if ERROR_LANGUAGE_* is reported), EXTRA_SUPPORTED_LANGUAGES from
+    LocaleList.getDefault(), LANGUAGE_SWITCH_QUICK_RESPONSE on API≥34,
+    and a 5000ms complete-silence timeout.
+  - onPartialResults/onResults forward to the Lumo listener with an
+    `isFinal` flag. onRmsChanged forwards dB for the waveform.
+
+VoskSpeechRecognizer details:
+  - Bundles model "model-en-us" unpacked via StorageService.unpack(context,
+    "model-en-us", "model", ...). Loaded lazily on first use (manager field
+    `voskEngine by lazy`).
+  - Runs at 16 kHz mono. Spits JSON {partial:"..."} and {text:"..."} which
+    the recognizer parses and forwards as partial / final respectively.
+  - On onFinalResult / onTimeout it calls listener.restart() — Vosk stops
+    after each utterance, so this re-arms it for continuous capture.
+  - No RMS callback; the waveform for Vosk is driven by an independent
+    AudioRecord tap (see §6).
+  - CoroutineScope on Dispatchers.Main; cancel()/stop()/shutdown() in destroy.
+
+SpeechViewModel (@HiltViewModel):
+  State: SpeechUiState(isListening, partialSpokenText, rmsDbValue,
+                       speechStatusText: UiText, isVosk)
+  - Internal `finalBuffer` accumulates finalised segments so partial
+    results append continuously. On `isFinal`, appends "." if the buffer
+    doesn't already end with one — gives sentence-like punctuation.
+  - errors -> Channel<UiText> -> Toast in SpeechSheet.
+  - determineSpeechStatusText() updates the status pill text + isVosk flag
+    whenever the engine switches (On-device • Private / Google / Vosk …).
+
+DI (Hilt):
+  - SpeechModule (@Module, @InstallIn(ViewModelComponent)) provides
+    SpeechRecognitionManager as @ViewModelScoped (one per SpeechViewModel).
+  - SpeechBinder (@Binds) binds SpeechRepositoryImpl -> SpeechRepository,
+    also @ViewModelScoped. SpeechRepositoryImpl takes WebAppInterface.
+
+============================================================
+2. How the mic button is implemented and positioned
+============================================================
+
+KEY FINDING: There is NO native Compose mic button. The mic button is
+rendered by the web SPA inside the WebView; the Android app only wires it
+up and overlays a native bottom sheet on tap.
+
+The web app exposes two elements (LumoOS-side; the Android app assumes
+they exist):
+  - #voice-entry-mobile          — the button container (hidden by default
+                                   on desktop; unhidden by the Android
+                                   injector on mobile).
+  - #voice-entry-mobile-button   — the clickable affordance inside it.
+
+JsInjector.injectEssentialJavascript() (JsInjector.kt:16-267) — runs on
+onPageFinished for lumo/account domains — does three things to the mic
+button:
+  (a) Unhides #voice-entry-mobile (removes the `hidden` class) once the
+      `.lumo-input-container` is detected.
+  (b) Force-hides the web's `.prompt-entry-hint` text (display:none
+      !important) — the native app removes the placeholder hint, presumably
+      because the native status pill / mobile layout already communicates it.
+  (c) Attaches a click listener to #voice-entry-mobile-button (idempotent
+      via `data-android-handler` attribute) that calls
+      `window.Android.startVoiceEntry()`.
+
+Click → native flow:
+  WebAppInterface.startVoiceEntry (@JavascriptInterface)
+    -> mainEventChannel.trySend(MainWebEvent.StartVoiceEntryRequested)
+    -> MainActivityViewModel listens, calls startVoiceEntry()
+       -> if RECORD_AUDIO already granted:
+            _eventChannel.trySend(UiEvent.ShowSpeechSheet)
+          else:
+            audioPermissionContract.request()   // rememberSinglePermission
+            // onGrant: viewModel.startVoiceEntry()  (re-enters, now shows sheet)
+            // onDeny:  viewModel.showMissingPermission(...)
+    -> MainActivity.handleUiEvent(ShowSpeechSheet)
+       -> navController.navigate(NavRoutes.SpeechToText)
+    -> NavHost `dialog<NavRoutes.SpeechToText> { SpeechSheet(onDismiss=...) }`
+
+So the mic button is "owned" by the web app; native just bridges the click,
+the permission, and the overlay UI. The custom user agent
+`ProtonLumo/<ver> (Android <ver>; <device>)` (WebViewScreen.kt) is what the
+web SPA presumably uses to decide to render `#voice-entry-mobile` at all
+(see also the previous LumoOS worklog entry, where the web side keys off
+the user agent / a mobile flag).
+
+============================================================
+3. How recognised text flows from recognizer to composer
+============================================================
+
+End-to-end pipeline (recognizer → composer):
+
+  [Recognizer]  onPartialResults(text, isFinal)
+        │  (SpeechRecognitionManager wraps the listener for fallback,
+        │   but otherwise passes through)
+        ▼
+  [SpeechViewModel listener]  finalBuffer += text (with " " separator;
+        │   if isFinal, append "." if not already there)
+        ▼
+  SpeechUiState.partialSpokenText  (StateFlow, collected in SpeechSheet)
+        │
+        │  user taps Submit (KeyboardArrowUp button in SpeechInputContent)
+        ▼
+  SpeechViewModel.onSubmitTranscription():
+        transcript = _uiState.value.partialSpokenText
+        escaped = transcript
+            .replace("\\", "\\\\")      // backslash first
+            .replace("\"", "\\\"")      // double quotes
+            .replace("'", "\\'")        // single quotes (harmless in "...")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        speechRepository.injectText("\"$escaped\"")  // wrapped in JS string literal
+        (resets isListening, destroys recognizer, clears partial)
+        ▼
+  SpeechRepositoryImpl.injectText(spokenText) ->
+        webBridge.injectSpeechOutput(spokenText)
+        ▼
+  WebAppInterface.injectSpeechOutput ->
+        injectSpokenText(webView, spokenText)        // JsInjector.kt:1373
+        ▼
+  webView.evaluateJavascript("(window.insertPromptAndSubmit($text))")
+        ▼
+  window.insertPromptAndSubmit(prompt)  (defined in injectEssentialJavascript,
+        JsInjector.kt:194-256):
+        - Calls window.startProgrammaticOperation()  // suppresses the
+                                                     // keyboard-positioning
+                                                     // handler (see §5)
+        - tryInsertPrompt(): finds `.tiptap.ProseMirror.composer`, gets
+            `p:last-child` (creating a <p> if none), appends text with a
+            smart space if the last paragraph isn't already terminated by
+            a space. Focuses the editor, moves the caret to end of the
+            last <p> via Selection/Range.
+        - Retries up to 10 times @500ms if the editor isn't mounted yet
+            (handles the race where the user taps mic on a freshly-loaded
+            page before the SPA mounts the TipTap editor).
+        - Calls window.endProgrammaticOperation() on success or final
+            failure.
+
+IMPORTANT CAVEAT: despite the name `insertPromptAndSubmit`, the function
+only INSERTS the text — it does not invoke the submit action. The user
+must tap the web app's send button themselves. This is presumably
+intentional (let the user proof-read the transcription), but the name is
+misleading. If the LumoOS task (see prior worklog entry about the
+`lumo-mic-inject.js` desktop flow) is expecting auto-submit, this will
+disappoint it.
+
+============================================================
+4. How JsInjector bridges native speech recognition to the webview
+============================================================
+
+JsInjector.kt is a 1390-line file of top-level `fun injectX(webView, …)`
+helpers, each shipping a `(function(){ … })()` IIFE to the page via
+`webView.evaluateJavascript`. The bridge has two directions:
+
+INBOUND (web → native):  WebAppInterface is added as the JS interface
+  named "Android" (WebAppInterface.attachWebView, called from
+  WebViewScreen.createWebView). Exposed @JavascriptInterface methods:
+    - startVoiceEntry()         — mic tap (see §2)
+    - onPageTypeChanged(isLumo, url)
+    - onNavigation(url, type)   — push/pop/replace
+    - onLumoContainerVisible()  — when `.lumo-input-container` appears
+    - onThemeChanged(mode) / onThemeStyleChanged(themeStyle)
+    - showPayment() / showBlackFridaySale()
+    - retryLoad()
+    - log(message)
+    - postFeatureFlagResult(transactionId, resultJson, functionName)  (FF RPC)
+  Each just trySend()s into mainEventChannel; MainActivityViewModel
+  collects and routes to UiState / UiEvent.
+
+OUTBOUND (native → web): called directly on the WebView via
+  evaluateJavascript. Relevant to mic/speech:
+    - injectSpokenText(webView, text)        — JS string literal; calls
+        window.insertPromptAndSubmit(text). Used by SpeechRepository.
+    - injectTheme(webView, theme, mode)      — applied to <html> class
+    - injectSafeAreaInsets(webView, …)       — sets --safe-area-inset-*
+        CSS vars + env() fallbacks so the web prompt bar can respect
+        edge-to-edge / IME insets (WebViewScreen.kt, called from the
+        ViewCompat WindowInsets listener).
+
+Injection orchestration (LumoWebClient):
+  onPageStarted  (lumo/account domains):
+      injectSignupPlanParamFix(view)
+      injectKeyboardHandling(view)         // EARLY — see §5
+  onPageFinished (lumo/account domains, skips error page):
+      injectAndroidInterfacePolyfill(view) // robustness polyfill for window.Android
+      injectEssentialJavascript(view)      // mic button + insertPromptAndSubmit + container observer
+      injectLumoContainerCheck(view)
+      injectPromotionButtonHandlers(view)
+      injectUpgradeLinkHandlers(view)
+      themeChangeListener(view)
+      themeStyleChangedListener(view)
+      injectBF2025PromotionHandler(view)
+      injectUpgradeLinkHider(view)
+      injectSignupPlanParamFix(view)
+      (+ account-domain only: injectAccountPageModifier)
+      (+ delayed: requestApplyInsets @300ms, verifyAndroidInterface @1s,
+       safety loading-hide @2s)
+
+So the bridge is essentially: native owns the speech engine + permission
+flow + overlay sheet; web owns the prompt bar DOM (TipTap/ProseMirror
+composer). They communicate via the `Android` JS interface (inbound) and
+`evaluateJavascript` (outbound). The composer is never mirrored into
+native — recognized text is pasted directly into the web editor by
+JS DOM manipulation.
+
+============================================================
+5. Mobile prompt bar layout vs. web version
+============================================================
+
+The prompt bar is NOT reimplemented in native Compose — the web SPA's
+`.lumo-input-container` (containing `.lumo-input` with a
+`.tiptap.ProseMirror.composer` contentEditable) is what the user sees.
+Native customises its behaviour on mobile via three mechanisms:
+
+(a) Custom user agent
+    WebViewScreen.generateCustomUserAgent() builds:
+      ProtonLumo/<version> (Android <release>; <manufacturer model>)
+    The web SPA keys off this (per the prior LumoOS worklog entry) to
+    render `#voice-entry-mobile` and otherwise pick the mobile layout.
+
+(b) Safe-area inset injection (WebViewScreen.injectSafeAreaInsets)
+    A WindowInsetsCompat listener on the WebView converts system-bar +
+    IME insets to dp and injects them as CSS variables
+    (--safe-area-inset-{top,right,bottom,left}) and env() fallbacks onto
+    :root. The composer can then use these for edge-to-edge padding so it
+    isn't hidden by the keyboard / nav bar.
+
+(c) Keyboard-aware composer handling (JsInjector.injectKeyboardHandling,
+    ~300 lines, lines 578-890)
+    Exposes window.onNativeKeyboardChange(isVisible, dynamicKeyboardHeight)
+    for LumoChromeClient to call (height measured natively, more accurate
+    than visualViewport). On keyboard show, IF the activeElement is a
+    composer input (`.lumo-input .ProseMirror.composer`, contentEditable,
+    inside `.lumo-input` — explicit exclusion of buttons/hamburger), it
+    hides the `.lumo-welcome-section` (fade out 200ms then display:none).
+    On hide, it shows the welcome section again. Has:
+      - 150ms debounce on focusin to filter brief taps.
+      - window.startProgrammaticOperation / endProgrammaticOperation
+        flags so that programmatic text insertion (from voice) does NOT
+        trigger the keyboard-positioning path.
+      - MutationObserver re-binds focus listeners when a new
+        `.lumo-input-container` is added (single-page app nav).
+      - window.debugKeyboardPositioning() helper for diagnostics.
+
+(d) Native overlay (ChatScreen.kt)
+    ChatScreen is a plain Scaffold (topBar optional back-to-Lumo button)
+    containing an AndroidView(WebView) + a LoadingScreen overlay. No
+    native input bar, no native mic button — just the WebView. The
+    speech UI is a separate Material3 ModalBottomSheet (SpeechSheet)
+    shown as a navigation dialog when the user taps the web mic button.
+
+(e) prompt-entry-hint removal
+    injectEssentialJavascript force-hides `.prompt-entry-hint`
+    (display:none !important) on mobile — the web's placeholder hint
+    text is suppressed, presumably to avoid duplicating the native
+    status pill / listening state text.
+
+============================================================
+6. Waveform / visualizer implementation
+============================================================
+
+Three classes:
+
+MicVisualizer (ui/components/waveform/MicVisualizer.kt) — raw, not Compose:
+  - Owns an AudioRecord (MediaRecorder.AudioSource.MIC, 16 kHz, MONO,
+    PCM_16BIT, minBufferSize).
+  - start(scope, onAmplitude: (Float)->Unit) launches a coroutine on
+    Dispatchers.IO that loops `audioRecord.read(buffer)` and computes
+    RMS = sqrt(sum(sample^2)/n). @SuppressLint("MissingPermission")
+    — the caller (SpeechSheet via rememberSinglePermission) is
+    responsible for the RECORD_AUDIO grant.
+  - stop() flips `running=false`, stops + releases AudioRecord.
+  - Used ONLY by VoskAudioWaveform (because Vosk doesn't expose RMS).
+
+VoskAudioWaveform (Compose):
+  - 30 vertical bars, barWidth=6f, gapWidth=4f, maxBarHeight=100f dp
+    (passed 60f by SpeechInputContent).
+  - Creates a MicVisualizer; in a LaunchedEffect(isListening) starts it
+    when listening and stops otherwise. The visualizer pushes RMS to
+    `targetRms`.
+  - A separate always-running LaunchedEffect(Unit) lerps displayedRms
+    toward targetRms by 0.2 every 16ms (~60 fps) for smooth animation.
+  - On each displayedRms change: normalise by RMS_SCALE_FACTOR=2000,
+    curve with pow(0.5) (concave, exaggerates quiet sounds), smooth with
+    previous bar * 0.6, push onto a mutableStateListOf size 30 (shift +
+    add). Draws vertical rounded-cap lines centered horizontally.
+
+OnDeviceAudioWaveform (Compose):
+  - Same 30-bar layout but driven by `rmsDbValue: Float` from the
+    ViewModel (which comes from SpeechRecognitionManager.onRmsChanged,
+    i.e. Android's RecognitionListener.onRmsChanged — dB units).
+  - Normalises (rmsDb - MIN_DB=-2) / (MAX_DB=10 - MIN_DB) → [0,1],
+    curve pow(0.7) (less aggressive than Vosk), same 0.6 smoothing,
+    same shift+add history.
+  - Logs every RMS sample at INFO (Timber tag "AudioWaveform") —
+    verbose; worth toning down for production.
+
+Which waveform is shown: SpeechInputContent.Waveform picks
+  if (isVosk) VoskAudioWaveform else OnDeviceAudioWaveform
+based on `SpeechUiState.isVosk` (set whenever engineState()==Vosk, i.e.
+either the user has no OnDevice recognition or the OnDevice engine
+failed and the manager fell back to Vosk).
+
+SpeechInputContent layout:
+  Column [status pill (rounded, white-15% alpha bg) | spacer |
+          Row { Cancel-IconButton | WaveformWithTimer (weight 1f,
+          centered) | Submit-Button (56dp circle, white, KeyboardArrowUp
+          icon, primary tint) } | partialSpokenText (or "Listening…"/
+          "Tap submit or speak" if empty) | spacer]
+  Elapsed timer mm:ss below the waveform, increments 1/sec while
+  isListening. Sheet uses LumoTheme.colors.primary as background
+  (so on dark theme the sheet is the brand purple, white text).
+  ModalBottomSheet is skipPartiallyExpanded=true, shown with a 100ms
+  delay after composition, auto-calls viewModel.onStartVoiceEntryRequested()
+  to begin listening immediately. On error or permission denied, hides
+  + dismisses.
+
+============================================================
+Summary / cross-cutting notes
+============================================================
+
+- The mic button is a web-DOM element bridged to native; there is no
+  Compose MicButton. Native's role is permission + overlay sheet +
+  JS glue. Any "add a mic button" feature work has to touch the web
+  SPA (LumoOS) for the visible button, and the Android injector for
+  the click → startVoiceEntry wiring.
+- Three recognizers with auto-fallback OnDevice → Vosk → GoogleCloud;
+  Vosk is preferred over Google for privacy (offline, on-device).
+  Continuous dictation is implemented by re-arming on
+  ERROR_NO_MATCH / Vosk onFinalResult / onTimeout via listener.restart().
+- Recognized text is JSON-string-escaped and pasted directly into the
+  web's TipTap ProseMirror composer via window.insertPromptAndSubmit,
+  which (despite the name) does NOT submit — user must press send.
+- The composer positioning on mobile is jointly managed by:
+  (a) native safe-area-inset CSS var injection, and
+  (b) injectKeyboardHandling's onNativeKeyboardChange + programmatic
+      operation flag (so voice-text insertion doesn't reflow the bar).
+- Engine selection drives both the waveform implementation
+  (Vosk = independent AudioRecord RMS; OnDevice/Google = onRmsChanged
+  dB) and the status pill text via isVosk in SpeechUiState.
+- All speech resources (recognizers, SpeechService, AudioRecord) are
+  @ViewModelScoped and torn down in SpeechViewModel.onCleared() /
+  onSubmitTranscription() (removeListener + cancelListening + destroy).
+- Potential cleanup opportunities spotted (not actioned — analysis only):
+    * onSubmitTranscription returns "" from an `also {}` on the empty
+      branch — dead code; the surrounding expression result is unused.
+    * OnDeviceAudioWaveform logs every sample at INFO — noisy in prod.
+    * `insertPromptAndSubmit` name vs. behaviour mismatch (see §3).
+    * AndroidSpeechRecognizer's companion TAG is "OnDeviceSpeechRecognizer"
+      even though it's the shared base — minor log-confusion.
+
+No code changes were made in this task — read-only analysis.
+
+---
+Task ID: lumoos-dictation-native-approach
+Agent: main (Z.ai Code)
+Task: Clone the Proton Lumo native Android app and implement the mic button using the correct architecture
+
+Work Log:
+- Cloned the Proton Lumo native Android app from https://github.com/ProtonLumo/android-lumo
+- Analyzed the native app's speech recognition architecture:
+  - The mic button is NOT a native Compose button — it's a web element
+    (#voice-entry-mobile-button) that the SPA already contains
+  - The native app's JsInjector unhides it and hooks it to
+    window.Android.startVoiceEntry() which triggers native speech recognition
+  - The SPA's source (in WebClients/applications/lumo/src/) has:
+    - useLumoFlags.ts: the LumoDictationV2 feature flag controls visibility
+    - ComposerToolbar.tsx: renders the DictationControl with the mic button
+    - useDictation.ts: a complete WebSocket-based dictation hook (connects
+      to wss://${host}/api/ai/v1/realtime, streams PCM16 audio, receives
+      transcription deltas)
+
+- Correct implementation (replacing the hacky injection script):
+  1. Enabled the LumoDictationV2 feature flag in the unleash stub
+     (lumo-server.cjs) — this makes the SPA's built-in mic button visible
+  2. Created lumo-dictation-bridge.js — a small script that:
+     - Hooks the SPA's #voice-entry-mobile-button click
+     - Prevents the SPA's built-in WebSocket dictation from starting
+       (since we don't have Proton's realtime endpoint)
+     - Uses the Web Speech API (SpeechRecognition) instead
+     - Inserts recognized text into the composer (same mechanism as the
+       native app's insertPromptAndSubmit)
+     - Shows visual feedback (red pulsing icon while recording)
+  3. Removed the hacky lumo-mic-inject.js (which created a separate button)
+  4. Added the bridge script via a <script> tag in index.html
+
+- This matches the native Android app's architecture exactly:
+  - Native app: shows SPA's mic button → hooks to native speech recognition
+  - Our web app: shows SPA's mic button → hooks to Web Speech API
+
+- Verification:
+  - SPA's built-in mic button (#voice-entry-mobile-button) FOUND in prompt bar
+  - Dictation bridge loaded (window.__lumoDictationBridge = true)
+  - #voice-entry-mobile container visible (not hidden)
+  - Mic button present on both desktop and mobile (375x812)
+  - Zero console errors
+  - All 45 tests pass
+  - Cache version: ?v=59
+
+Stage Summary:
+- ✅ Cloned the Proton Lumo native Android app and analyzed its architecture
+- ✅ Enabled the LumoDictationV2 feature flag (shows the SPA's built-in mic button)
+- ✅ Created lumo-dictation-bridge.js that bridges the SPA's mic button to the
+  Web Speech API (matching the native app's JsInjector approach)
+- ✅ Removed the hacky lumo-mic-inject.js (which created a separate button)
+- ✅ The SPA's native mic button is now visible and functional on desktop + mobile
+- Cache version: ?v=59. All 45 tests pass. Zero console errors.
