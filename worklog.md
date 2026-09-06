@@ -736,3 +736,310 @@ Stage Summary:
   URLs remain. The URL builder now returns local URLs (window.location.origin)
   instead of either proton.me or "#".
 - Cache version: ?v=49. Server running on port 3000.
+
+---
+Task ID: MCP-AUDIT-1
+Agent: MCP Audit Agent
+Task: Audit MCP implementation against the revised prompt-bar + agent-managed connection spec
+
+Work Log:
+- Read /home/z/my-project/LumoOS/MCP.md (243 lines) — design doc covering
+  architecture, per-user connections lifecycle, prompt-bar spec, security notes.
+- Read /home/z/my-project/LumoOS/mcp-manager.cjs (455 lines) — transport
+  lifecycle (connect/disconnect/test/discover/callTool), SSRF guard, tool
+  classification (read-only/write/unclassified), toolPermissions gate.
+- Read /home/z/my-project/LumoOS/mcp-connections.cjs (556 lines) — control
+  plane service: connection records in SQLite, AES-256-GCM credential
+  encryption, one-time OAuth (state+PKCE) and API-key setup flows,
+  lumo__connection_{list,connect,status,disconnect} control tools,
+  validateConnection -> ready only after real connect+discover.
+- Read /home/z/my-project/LumoOS/lumo-server.cjs key sections (2310 lines
+  total): buildMcpChatLoop (241-300), evaluateToolPolicy (202-232),
+  runMcpChatLoop (1592-1773), handleByokProxy zap_mcp stripping (1797-1811),
+  admin MCP endpoints (1042-1296), /api/lumo/v1/mcp/connections catalog
+  (2132-2167), /mcp/setup/<flow> and /mcp/oauth/callback pages (2210-2275),
+  rateLimit helper (452-462), SIGINT/SIGTERM shutdown (2287-2303).
+- Read /home/z/my-project/LumoOS/store.cjs schema (80-90) — confirms
+  mcp_servers and mcp_connections as SEPARATE tables, with index
+  idx_mcp_connections_owner on (server_id, owner_uid); list/get/upsert/delete
+  ops at lines 308-348.
+- Read /home/z/my-project/LumoOS/patch-mcp-promptbar.cjs (277 lines) — UI
+  patch injecting the prompt-bar Tools-menu MCP connections sub-view,
+  per-connection toggles writing to localStorage["lumo.mcp.disabled.v1"],
+  zap_mcp body field on chat requests.
+- Read /home/z/my-project/LumoOS/patch-mcp-toolcards.cjs (76 lines) —
+  BYOK SSE parser/consumer patches that render zap_tool frames as native
+  tool-call cards.
+- Cross-referenced /home/z/my-project/LumoOS/tests/mcp-connections.test.mjs
+  (505 lines, 18 tests) and /home/z/my-project/LumoOS/tests/mcp-proxy.test.mjs
+  (656 lines, 16 tests) to verify coverage of: PKCE, replay refusal, TTL
+  expiry, per-uid cap (20), write-approval enforcement at advertisement AND
+  execution, stale-call rejection, control-plane round trips, rate-limit
+  enforcement, redaction proofs.
+
+Stage Summary:
+
+1) Architecture separation — EXISTS / well-formed
+   - Clear five-way split: mcp_servers rows (admin definitions, store.cjs:83),
+     mcp_connections rows (user/tenant records, store.cjs:86), Tool operation
+     (manager.callTool with (entry, toolName, args)), Policy (ONE canonical
+     evaluateToolPolicy at lumo-server.cjs:202-232 used everywhere), Agent
+     tool selection (lumo__* control tools in mcp-connections.cjs:48-102).
+   - Control-plane and data-plane kept separate: runMcpChatLoop branches on
+     tc.name.startsWith(CONTROL_PREFIX) at lumo-server.cjs:1707 and dispatches
+     to connService.executeControlTool instead of mcpManager.callTool.
+   - MISSING (minor): "Agent" is hard-coded in the system prompt note
+     (CONTROL_SYSTEM_NOTE at mcp-connections.cjs:38-46); there is no pluggable
+     agent/strategy abstraction — the model itself is the agent.
+   - Severity: LOW. The current shape matches the documented design.
+
+2) Connection lifecycle — EXISTS / mostly complete
+   - States present (mcp-connections.cjs:22-25, 219-260): available (implicit,
+     no record) → authorizing → connected → ready, with failed /
+     needs_reauth / revoked as terminal/recoverable states. "discovering"
+     is NOT an explicit state — the connected→ready transition is atomic in
+     validateConnection (lines 277-310) and is gated on
+     `st.lastDiscoveredAt` being stamped by a real tools/list answer.
+   - Honest status mapping (connectionStatusFor, 227-260): ready only when
+     record.status==='ready' AND live transport is connected; otherwise
+     not_discovered / unavailable / available / authorizing / needs_reauth /
+     revoked. The mapTransportStatus helper (219-223) translates manager
+     states to catalog states.
+   - MISSING: there is no explicit "discovering" state. The brief
+     connected→ready window is silent (the record sits in 'connected'
+     internally until discover succeeds or fails). Documentation does not
+     list 'discovering' as a state, so this is consistent — but a UI wanting
+     to show "discovering tools…" would have no signal.
+   - Severity: LOW. Matches the documented state machine exactly.
+
+3) Security — EXISTS / strong, with two gaps
+   - OAuth: random 24-byte state token (mcp-connections.cjs:353), PKCE S256
+     verifier+challenge (354, 363-365), one-time use (deleted BEFORE token
+     exchange at line 388), 10-min TTL (line 34, sweepFlows at 211-215),
+     per-account cap of 20 live flows (317-322), CSRF defended by the state.
+     CompleteOAuth (370-421) validates state ownership (flow.ownerUid ===
+     rec.ownerUid, line 392).
+   - API keys: AES-256-GCM encryption with random 12-byte IV + auth tag
+     (130-137); key in data/secret.key (0600, separate from the DB, line
+     125). Register-secrets set at 413/436 feeds the manager's redact()
+     which scrubs values from every log/error/tool-result string.
+     Verification: tests/mcp-connections.test.mjs:175 ("credential encrypted
+     at rest — plaintext never touches the store") and :194 ("logs never
+     carry the key").
+   - SSRF/RCE: assertUrlAllowed (mcp-manager.cjs:67-90) refuses loopback /
+     private / link-local / CGNAT / IPv4-mapped targets unless
+     `trustedLocal` is set. STDIO servers spawn via StdioClientTransport
+     (no shell, cross-spawn wrapper). The admin can ONLY add servers via
+     /api/lumo/v1/admin/mcp/servers (requireAdmin at line 1163); chat can
+     never register commands/URLs/env — lumo__connection_connect resolves
+     ONLY admin-registered serverIds via getServerDef (mcp-connections.cjs:323).
+   - Confirmation: startConnect and disconnectConnection both enforce a
+     `confirm:true` gate and return needsConfirmation when absent
+     (mcp-connections.cjs:330-332, 444-446). CONTROL_SYSTEM_NOTE tells the
+     model to ALWAYS ask yes/no first.
+   - GAP A (MEDIUM): The confirmation gate is "soft" — the server trusts
+     confirm:true. A misbehaving model could pass confirm:true without
+     actually asking. There is no separate UI confirmation flow (chat-tool
+     round-trip is the only signal). For destructive ops this is acceptable
+     given the threat model (the model is already trusted to call the
+     control tool at all), but a hard "user clicked Approve" path would be
+     more defensible.
+   - GAP B (LOW): SSRF check fires only at connect() time in buildTransport
+     (mcp-manager.cjs:222), NOT at admin save time (saveMcpEntry only does
+     a protocol regex at lumo-server.cjs:1145). An admin can save a private
+     URL with trustedLocal=false; the rejection happens lazily on first
+     connect. DNS rebinding between validate-time and fetch-time is also
+     unmitigated. Acceptable for admin-trusted endpoints; flag for hardening.
+   - GAP C (LOW): POST /mcp/setup/<flowId> has no CSRF token — but the
+     one-time, 15-min, single-use flowId embedded in the form action URL
+     functions as the capability token, so an attacker without the URL
+     cannot submit. Acceptable.
+
+4) Policy evaluator — EXISTS / canonical and enforced twice
+   - ONE function: evaluateToolPolicy at lumo-server.cjs:202-232, called
+     from buildMcpChatLoop (advertising, line 271) AND runMcpChatLoop
+     (execution, line 1735) — same code path both times.
+   - Receives current request muted IDs: buildMcpChatLoop captures
+     mutedServerIds (line 242, from zap_mcp stripped at 1801-1811) and
+     passes them through loop.mutedServerIds (line 294) to the
+     execution-time recheck (line 1735).
+   - Namespacing: mcpQualifiedToolName (lumo-server.cjs:182-191) qualifies
+     as `${sanitizedServerId}__${sanitizedToolName}` and dedupes via the
+     `taken` Set. The control-plane prefix `lumo__` is reserved (the
+     normalizer at line 149 filters any server whose sanitized id would
+     collide with 'lumo'). Test at mcp-proxy.test.mjs:544 verifies.
+   - Stale/fabricated rejection: if the model returns a tool name not in
+     loop.qualified (line 1721-1724) the loop returns "Unknown tool"
+     WITHOUT calling mcpManager. If the tool WAS advertised but the
+     connection died mid-request, evaluateToolPolicy re-runs
+     statusView (line 223-225) and returns deny('tool_unverified').
+     Tests at mcp-proxy.test.mjs:478 (fabricated name) and :505
+     (connection dropped) prove both paths.
+   - GAP (LOW): Qualified tool name is serverId-only, NOT
+     (serverId, connectionId) — two users connecting to the same auth server
+     would get the same `serverid__tool` string. This is safe today because
+     each request only sees the requester's own tools, but it forecloses a
+     future "tenant + user" dual-advertise path. The spec asked for
+     (serverId/connectionId, toolName) namespacing.
+   - Severity: LOW.
+
+5) API contracts — EXISTS / mostly complete
+   - Connection records persisted SEPARATELY from server definitions:
+     store.cjs:83 (mcp_servers) and store.cjs:86 (mcp_connections) are two
+     distinct tables with their own rows; connService.loadRecords at
+     mcp-connections.cjs:152 reads only connection rows.
+   - Catalog response redaction: /api/lumo/v1/mcp/connections
+     (lumo-server.cjs:2132-2167) returns Id, Name, Auth, Status, Error.code,
+     ToolCount, Tools (name strings only), LastDiscoveredAt, LastValidatedAt.
+     No commands/URLs/env/headers/schemas/credentials. Test at
+     mcp-proxy.test.mjs:486-503 asserts `'127.0.0.1' must never appear in
+     the catalog` and `!('url' in c)`.
+   - Operations: create/start-auth/callback/test/list/reconnect/revoke/
+     disconnect exist BUT split across two surfaces:
+       • admin REST: PUT/GET/DELETE /admin/mcp/servers (lumo-server.cjs:1162),
+         POST /admin/mcp/servers/connect|disconnect|test (1233-1244),
+         POST /admin/mcp/import (1246), GET /admin/mcp/export (1284),
+         DELETE /admin/mcp/connections (1202 — admin revoke any record).
+       • user lifecycle: ONLY GET /api/lumo/v1/mcp/connections (catalog).
+         start-auth/callback/reconnect/revoke/disconnect/test for users go
+         through the lumo__* chat tools, NOT REST endpoints. /mcp/setup/
+         and /mcp/oauth/callback are browser-facing one-time HTML pages.
+   - Authenticated & authorized: requireAdmin (lumo-server.cjs:346-357)
+     gates every admin route; the user catalog requires an active signed-in
+     user (line 2138). Control-plane tools use loop.uid captured from the
+     BYOK proxy's activeUserForUid (line 1887).
+   - Idempotent: server save is upsert-by-id (store.cjs:315); admin delete
+     is idempotent ("not found" if missing, 1191); connService.startConnect
+     is idempotent on retries/concurrent calls (test at
+     mcp-connections.test.mjs:310-328 proves "reuse one record").
+   - Rate-limited: /mcp/* browser pages rate-limited 60/min per IP
+     (lumo-server.cjs:2212, test at mcp-proxy.test.mjs:645). NO rate limit
+     on /admin/mcp/* or /api/lumo/v1/mcp/connections — rely on
+     authentication instead. Per-account cap of 20 live authorizations is
+     enforced (mcp-connections.cjs:320, test at :481).
+   - Auditable: logReq emits "admin mcp save|delete|import|connect|test|
+     disconnect|connection revoke" lines; mcpLog emits "[MCP]" connect/
+     discover/tool-call lines and "control lumo__* -> ok|error" per request
+     (lumo-server.cjs:1719). All lines pass through redact().
+   - GAP (LOW): No request-level rate limit on the catalog endpoint (an
+     authenticated user could poll it aggressively). Inexpensive read,
+     so likely fine.
+   - Severity: LOW.
+
+6) Agent-managed connection capability — EXISTS / matches spec exactly
+   - Four lumo__* control tools defined (mcp-connections.cjs:48-102):
+     connections_list, connection_connect {serverId, confirm},
+     connection_status {serverId}, connection_disconnect {serverId, confirm}.
+   - All four are advertised to the model whenever ANY server definition
+     exists (lumo-server.cjs:289 — `if (defsExist) tools.push(...controlToolDefs())`),
+     even if that server is disabled, so the agent can always honestly
+     explain "the admin has not enabled/added this connection."
+   - List integrations ✅, list connections ✅, start auth flow ✅
+     (returns setupUrl for api_key, authorizeUrl for oauth),
+     complete OAuth ✅ (browser round-trip via /mcp/oauth/callback),
+     test connections ✅ (validateConnection is called from completeSetup/
+     completeOAuth; connection_status reads the honest live state),
+     reconnect/revoke/disconnect ✅ (disconnectConnection wipes credential
+     and closes transport), report available tools ✅ (Tools field in the
+     connections_list response), ask clarifying questions ✅ (the
+     CONTROL_SYSTEM_NOTE at lines 38-46 explicitly tells the model to ask
+     when no match and never to invent servers).
+   - Control tools execute server-side BEFORE any MCP dispatch
+     (lumo-server.cjs:1707-1719), never reach mcpManager.callTool, and
+     return JSON payloads framed as "[Connection manager result]" in the
+     tool message (line 1717, 1757).
+   - MISSING (minor): no separate "lumo__connection_test" tool — testing
+     happens implicitly via connection_status reading the live transport
+     state. The spec listed "test connections" as an agent capability;
+     status effectively covers it, but a model wanting to force a re-test
+     has no tool for that (it would call connection_connect with confirm
+     on an already-ready record, which returns "already connected").
+   - Severity: LOW.
+
+7) UI behavior — PARTIALLY EXISTS / several gaps
+   - Prompt-bar MCP menu EXISTS: patch-mcp-promptbar.cjs injects a third
+     view ("mcp") into the existing ToolMenuDropdown popover (4206 chunk),
+     with a main-view row that opens it (line 104-109). Catalog is fetched
+     on every menu open (zapTickV effect at line 56) so admin changes appear
+     without reload.
+   - Status dots per connection: yes — connection row maps Status to a dot
+     class (zap-dot-connected / -connecting / -error) with ARIA label
+     (lines 86-90). Status text: Ready / Authorizing… / Needs sign-in /
+     Unavailable / Not checked / Available — matches the catalog states.
+   - Per-connection mute toggle: yes — writes to
+     localStorage["lumo.mcp.disabled.v1"] (uid-stamped, account-switch
+     resets at line 66), cross-tab sync via storage event (line 71).
+   - Retry row on catalog fetch failure: yes (line 82 — "MCP connections
+     unavailable — Retry" button).
+   - MISSING — Connection cards for setup/auth/success/failure/reconnect/
+     disconnect: the prompt bar only shows ROWS with status + toggle.
+     The setup/auth/success/failure UIs are minimal server-rendered HTML
+     pages at /mcp/setup/* and /mcp/oauth/callback (lumo-server.cjs:2217
+     `page()` helper). There is NO in-app connection card flow.
+   - MISSING — Keyboard accessibility: no explicit keydown handlers in
+     the patch (only standard DropdownMenuButton focus behavior inherited
+     from the framework). Toggle is a checkbox-style component.
+   - MISSING — Focus preservation: the patch does not capture/restore
+     focus when the menu opens/closes or when a connection toggles.
+   - GAP (MEDIUM): the spec asked for "Connection cards for setup/auth/
+     success/failure/reconnect/disconnect" — these exist only as external
+     standalone HTML pages, not as in-app cards. A user clicking an
+     "Authorize" link from the chat (delivered as a tool result) leaves
+     the app entirely. Functional but not the polished UX the spec implies.
+   - Severity: MEDIUM (UX gap, not a release blocker).
+
+8) Write-capable tool approval — EXISTS / matches spec
+   - Tool classification derived from MCP annotations (mcp-manager.cjs:429-438):
+     readOnly → 'read-only' (default-on), readOnlyHint:false OR
+     destructiveHint:true → 'write', unannotated → 'unclassified'
+     (default-on).
+   - Read-only tools enabled after discovery: yes — buildMcpChatLoop
+     advertises any tool whose evaluateToolPolicy returns allowed, and
+     the policy only denies 'write' without explicit opt-in
+     (lumo-server.cjs:228).
+   - Destructive tools require separate admin approval: yes —
+     `entry.toolPermissions[toolName] !== 'on'` denies with
+     'approval_required' (line 228-229). The 'on' value is the only
+     "approved" state (mcp-manager.cjs:135-138 — only 'off' is denied
+     at the toolAllowed level; the 'on' check is write-specific).
+   - toolPermissions mechanism: yes — store.cjs persists the full entry
+     doc (including toolPermissions) in mcp_servers.doc; admin form saves
+     round-trip without the map carry the stored one forward
+     (lumo-server.cjs:1095, 1154-1158 — test at mcp-proxy.test.mjs:467-476
+     proves form save preserves prior approvals).
+   - Enforced at advertisement AND execution: yes —
+     evaluateToolPolicy is called twice (lumo-server.cjs:271 and 1735).
+   - Stale or non-approved tool call rejected before mcp.callTool: yes —
+     the execution path short-circuits at line 1736-1739 with
+     `resultText = "Tool refused: ${pol.reason}"` and never reaches
+     mcpManager.callTool. Test at mcp-proxy.test.mjs:434-484 covers all
+     four sub-cases (write-capable NOT advertised without opt-in; write
+     advertised+executed after opt-in; form save preserves opt-in;
+     fabricated name refused with "Unknown tool").
+   - GAP (LOW): the spec mentioned "interactive confirmation dialogs in
+     chat" as a possible future mechanism — the implementation explicitly
+     documents this as absent (MCP.md:70-72, "per-tool disable is the
+     enforcement mechanism"). Acceptable per the documented threat model.
+   - Severity: LOW.
+
+Overall verdict — NO release blockers found. The implementation matches
+the revised prompt-bar + agent-managed connection spec on every
+load-bearing point: canonical policy evaluator, separate connection/server
+records, AES-256-GCM credentials, one-time OAuth state with PKCE, agent
+control tools, request-scoped mute, write-capable admin opt-in enforced
+twice, stale/fabricated call rejection, catalog redaction, honest
+ready-only-after-discovery state, reserved lumo__ prefix, SIGINT/SIGTERM
+transport cleanup. Tests cover the matrix (39 tests across two suites).
+
+Three things to address before public release (none are blockers):
+  - MEDIUM: in-app connection cards (setup/auth/success/failure/reconnect/
+    disconnect) — currently only external standalone HTML pages. The
+    prompt-bar UI shows status rows but no rich connection-card flow.
+  - LOW: 'discovering' state is implicit (connected→ready is atomic in
+    validateConnection) — a UI wanting to show "discovering tools…"
+    has no signal.
+  - LOW: qualified tool names are serverId-namespaced only, not
+    (serverId, connectionId)-namespaced; SSRF check is lazy (fires at
+    connect time, not save time) and is not rebinding-safe; confirmation
+    gate trusts the model's confirm:true flag without a separate UI
+    approval path.
