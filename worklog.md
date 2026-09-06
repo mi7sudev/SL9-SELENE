@@ -135,3 +135,37 @@ Stage Summary:
 - New artifacts: fix-adminpanel-empty-providers.cjs (patch + SRI rebust).
 - Cache version is now ?v=42 (boot runtime.1696e10d.js bumped in index.html).
 - Server still running persistently on port 3000 (PID 1743, parent=tini).
+
+---
+Task ID: lumoos-admin-cache
+Agent: main (Z.ai Code)
+Task: User still sees read-only "configured by your administrator" + "No providers configured yet" after the admin-panel fix
+
+Work Log:
+- Re-verified the server is running (PID 1743, node lumo-server.cjs) and the
+  patched chunk (1306.43935624.chunk.js?v=42) is being served WITH the fix
+  present (setPs(ps.length?ps:[...]) — confirmed via curl, count=1).
+- Re-verified the index.html served by the server references
+  runtime.1696e10d.js?v=42 (the bumped cache version).
+- Searched all dist chunks: only 1306 and 4124 contain the ZAdminPanel /
+  admin-vs-readonly wrapper logic. Both were patched in the previous task.
+  No other chunk needs patching.
+- Fresh browser test (agent-browser, cleared cookies + localStorage):
+  loaded /, got runtime.1696e10d.js?v=42, logged in admin/admin123, /me
+  returned Role:1. Opened Settings -> AI Provider: ZAdminPanel rendered
+  FULLY (.zap-root present, "+ Add provider", "Fetch model list", "Delete
+  provider", "Provider base URL", "Provider API key", "Allowed models",
+  "Users" section, "MCP servers" section). ZERO console errors. The
+  read-only text ("configured by your administrator" / "No providers
+  configured yet") was NOT present. Screenshot: lumo-admin-working.png.
+- Conclusion: the fix is correct and the server is serving it. The user's
+  symptom is stale browser cache — their browser is still loading the old
+  unpatched chunks (cached at ?v=15 before the fix) instead of ?v=42.
+
+Stage Summary:
+- Server-side and fresh-browser verification both confirm the admin panel
+  works: admin/admin123 sees the full provider configuration UI.
+- The user needs to hard-refresh / clear browser cache to pick up ?v=42.
+- Cache-busting is already in place: index.html references ?v=42, and the
+  chunk URLs in the runtime were bumped to ?v=42, so a cache clear is a
+  one-time action — subsequent loads will use the new versions.
