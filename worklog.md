@@ -307,3 +307,79 @@ Stage Summary:
 - Cache version is now ?v=44. Server running on port 3000 (PID 7429).
 - Backend endpoint: POST /api/lumo/v1/admin/test-model {providerId, model,
   baseUrl?, apiKey?} → {ok, model, status?, error?}.
+
+---
+Task ID: lumoos-ui-consistency
+Agent: main (Z.ai Code)
+Task: Make AI Provider, Users, MCP Servers tabs visually consistent with the native Lumo settings design system (Account, General, Appearance)
+
+Work Log:
+- User noticed the 3 admin tabs looked different from the native tabs
+  (Account, Personalization, General, Appearance, About). Examined the native
+  design system by reading the dist chunk source:
+  - Native container: className="flex flex-column flex-nowrap *:min-size-auto gap-4"
+  - n8 SectionHeader: icon + text + subtext row, NO bordered card wrapper
+  - Native General tab: multiple n8 SectionHeader rows stacked with gap-4,
+    each row has a toggle button on the right; NO cards/borders anywhere
+  - Native Account tab: content sits directly on the panel background,
+    generous whitespace, minimalist
+  - The old admin tabs used custom .zap-root/.zap-body/.zap-card (bordered
+    rounded cards with light-gray background) + .zap-bar (button rows with
+    padding) + .zap-foot — a dense "admin panel" look that clashed with the
+    native minimalist style.
+- Rewrote fix-admin-ui-split.cjs:
+  - ZADMIN_CSS: removed .zap-root, .zap-body, .zap-card, .zap-bar, .zap-grid,
+    .zap-input, .zap-grow, .zap-modelshead, .zap-foot, .zap-msg-ok/fail,
+    .zap-empty (bordered versions). Kept only functional element styles
+    (.zap-mlist, .zap-mrow, .zap-ibtn, .zap-test, .zap-chip, .zap-user,
+    .zap-dd, .zap-dot) and made them borderless/flat, using Lumo CSS
+    variables (--primary, --background-weak, --border-weak, --text-weak,
+    --primary-minor-1) so they inherit the theme.
+  - ZProvPanel: container → "flex flex-column flex-nowrap *:min-size-auto
+    gap-4". Removed .zap-body/.zap-card wrappers. Provider dropdown + inputs
+    + Fetch button + model list + Add-model input + Save button now sit
+    directly in the flex column with gap-4 spacing, exactly like the native
+    Account tab. Action buttons (Add/Delete provider) moved into the n8
+    SectionHeader's `button` prop (top-right, like native toggles). Status
+    messages use "color-success text-sm" / "color-danger text-sm" (native
+    classes) instead of custom .zap-msg-ok/fail.
+  - ZUsersPanel: each user is now an n8 SectionHeader row (icon + displayName
+    + username·role subtitle + role dropdown/Enable/Disable/Delete buttons
+    in the `button` prop). No .zap-user/.zap-userinfo bordered rows.
+  - ZMcpPanel: each MCP server is an n8 SectionHeader row. Add/Import/Export
+    moved to the main header's `button` prop. Tool chips + env-var form
+    kept (no native equivalent) but restyled flat. Edit form uses a soft
+    background panel (var(--background-weak)) instead of a bordered card.
+  - makeWrapper fallbacks (non-admin views): same native container class,
+    n8 SectionHeader rows for read-only catalog, "color-weak text-sm" for
+    notices instead of .zap-empty.
+  - Bumped cache version to ?v=45.
+- Ran the patch: both chunks patched (39514 chars injected, down from 40355),
+  12 runtimes updated, SRI 0 mismatches.
+- Browser verification (agent-browser, fresh session):
+  - Login admin/admin123, zero new console errors.
+  - VLM comparison (native Account vs admin AI Provider): "highly
+    consistent… same modal container, same rounded corners, same white
+    background, same internal padding, no card-like borders."
+  - VLM 4-way comparison (Account + General native vs Users + MCP admin):
+    "blend in very well… same design system… perfectly aligned sidebar…
+    same typography."
+  - No .zap-root / .zap-card / .zap-bar elements in the DOM (confirmed via
+    querySelector — all 0).
+  - Functionality preserved: AI Provider test connection still works
+    ("✓ Connected!"), model edit/delete buttons present (2 each), Add
+    provider / Fetch model list / Save providers all present.
+  - Users tab: "Manage accounts" header + admin user row, no provider/MCP
+    content. MCP Servers tab: "+ Add server", "Import", "Export" buttons
+    present, no provider/users content.
+  - Screenshots: native-account-v2, native-general-v2, admin-ai-provider-v2,
+    admin-ai-provider-final, admin-users-v2, admin-mcp-final2,
+    admin-consistency-final.
+
+Stage Summary:
+- The 3 admin tabs (AI Provider, Users, MCP Servers) now use the SAME
+  container class, spacing, SectionHeader rows, and typography as the native
+  tabs (Account, General, Appearance). No more bordered "admin panel" cards.
+- All functionality preserved: per-model test connection, edit/delete,
+  provider CRUD, user role management, MCP server CRUD + connect/test.
+- Cache version is now ?v=45. Server running on port 3000 (PID 7429).
