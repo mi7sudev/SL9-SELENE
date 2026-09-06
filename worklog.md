@@ -383,3 +383,76 @@ Stage Summary:
 - All functionality preserved: per-model test connection, edit/delete,
   provider CRUD, user role management, MCP server CRUD + connect/test.
 - Cache version is now ?v=45. Server running on port 3000 (PID 7429).
+
+---
+Task ID: lumoos-audit-answer-mode-regenerate
+Agent: main (Z.ai Code)
+Task: Audit Answer Mode (Fast/Thinking) and Regenerate variants (Try again, Add details, More concise, Think longer, Describe desired changes) to verify they work like original Proton Lumo
+
+Work Log:
+- Examined the server-side chat proxy (handleByokProxy in lumo-server.cjs):
+  - Routes /byok-api/chat/completions to the admin-configured provider
+  - Provider-compatibility retry: if upstream 400s on reasoning_effort or
+    chat_template_kwargs, retries without them (so both Answer Modes work on
+    providers that don't support thinking params)
+  - Model allow-list enforced for non-admins
+- Examined the client-side thinking-mode patch (patch-thinking-mode.cjs):
+  - Fast mode: plain request (no reasoning_effort, no nudge)
+  - Thinking mode: reasoning_effort:"high" + "Deep think:" system nudge
+    (merged into existing system message if present, else prepended)
+  - Title generation: supposed to be pinned to Fast (window.__zapThink=false)
+- Verified all patches are applied to the dist chunks:
+  - __zapThink in 1306+4124 (2 occurrences each = set in d, reset in m)
+  - enableReasoning passed in all 1230 chunks
+  - reasoning_effort="high" + "Deep think" nudge present in 1306
+  - Regenerate menu (Describe changes, Try again, Add details, More concise,
+    Think longer) in 5467 chunk, loaded by the boot runtime
+- Browser end-to-end testing (agent-browser, admin/admin123, NVIDIA provider):
+
+  **Answer Mode audit:**
+  - Thinking mode (default): request body included
+    "reasoning_effort":"high" + "Deep think:" system nudge. Response showed
+    reasoning content ("Worked through your question" → answer). ✅ WORKS
+  - Fast mode (switched via model picker → Answer mode → Fast): request body
+    was plain (NO reasoning_effort, NO nudge). Just the conversation messages.
+    Response was quicker. ✅ WORKS
+  - The difference is clear and correct: Thinking adds the deep-think params,
+    Fast sends a plain request.
+
+  **Regenerate audit (all 5 variants tested on the LAST assistant message):**
+  1. "Try again" → system message: "Please try again with the same approach."
+     ✅ Full conversation history preserved, correct instruction.
+  2. "Add details" → system message: "Please provide a more detailed and
+     comprehensive response with additional information, examples, and
+     explanations." ✅
+  3. "More concise" → system message: "Please provide a shorter, more concise
+     response that focuses on the key points only." ✅
+  4. "Think longer" → system message: "Please take more time to carefully
+     consider your response. Think through the problem step by step and
+     provide a more thoughtful, well-reasoned answer." ✅
+  5. "Describe desired changes..." (custom text input, typed "Focus only on
+     the light and dark reactions") → system message: "Focus only on the
+     light and dark reactions" ✅ The response correctly focused on light
+     and dark reactions as requested.
+
+  All regenerate strategies:
+  - Include the full conversation history (previous Q&A pairs)
+  - Add the instruction as a system message before the last user message
+  - Correctly target the message being regenerated (not the first message)
+  - Stream the response
+  - Create a sibling version (shown as "N / N" in the UI)
+  - Respect the current Answer Mode (Fast/Thinking)
+
+- No bugs found in any of the audited features. Everything works as expected,
+  matching the original Proton Lumo behavior.
+
+Stage Summary:
+- ✅ Answer Mode (Fast): plain request, no thinking params. WORKS.
+- ✅ Answer Mode (Thinking): reasoning_effort:"high" + Deep think nudge. WORKS.
+- ✅ Regenerate "Try again": "Please try again with the same approach." WORKS.
+- ✅ Regenerate "Add details": "Please provide a more detailed..." WORKS.
+- ✅ Regenerate "More concise": "Please provide a shorter..." WORKS.
+- ✅ Regenerate "Think longer": "Please take more time..." WORKS.
+- ✅ Regenerate "Describe desired changes...": custom user text. WORKS.
+- All features follow the Proton Lumo architecture and work end-to-end with
+  the admin-configured BYOK provider. No fixes needed.
