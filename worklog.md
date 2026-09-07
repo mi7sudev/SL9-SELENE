@@ -1729,3 +1729,167 @@ Stage Summary:
   conversation creation without PGP keys. This is a known issue that
   requires either PGP key generation or client-side patching.
 - All 45 tests pass. Server running on port 3000.
+
+---
+Task ID: STANDARDS-REVIEW
+Agent: Standards Review Sub-Agent
+Task: Matt Pocock two-axis code review — Standards axis
+
+Work Log:
+- Read AGENTS.md, MCP.md (standards sources), worklog.md (project context).
+- Read lumo-server.cjs (relevant hunks: lines 30-109, 1515-1545, 2140-2259),
+  mcp-connections.cjs (525-596), fix-admin-ui-split.cjs, fix-context-usage.cjs,
+  fix-remove-proton-refs.cjs, fix-in-app-conn-modal.cjs, fix-mic-promptbar.cjs,
+  lumo-dictation-bridge.js, lumo-dist/index.html.
+- Grepped 1306/4206 chunks for the injected anchors (ZProvPanel/ZMcpPanel,
+  __lumoModelMeta, connModal).
+
+Stage Summary:
+
+HARD VIOLATIONS (documented standard):
+
+1. Parallel control-plane system — MCP.md "Per-user connections": users
+   connect/disconnect only through `lumo__*` chat tools + one-time
+   `/mcp/setup/<flowId>` server-rendered pages. The new
+   `POST /api/lumo/v1/mcp/connections/connect|disconnect` endpoints
+   (lumo-server.cjs:1525-1545) plus `connectInApp()` (mcp-connections.cjs:537)
+   bypass both. fix-in-app-conn-modal.cjs comment is explicit: "This replaces
+   the external HTML setup page". Violates AGENTS.md "Never introduce a
+   parallel system where Proton has a native one."
+
+2. Dist-patch debt not lifted — AGENTS.md: dist patches are "transitional…
+   should be lifted into source when the affected area is next touched."
+   fix-admin-ui-split.cjs injects ~54 KB of ZProvPanel/ZUsersPanel/ZMcpPanel
+   component JSX into minified 1306/4124; fix-in-app-conn-modal.cjs injects
+   four functions + a 40-inline-style modal. Source-level code living in
+   dist patches.
+
+3. Bypassed integrity toolchain — AGENTS.md: "After any dist-affecting change:
+   run `node bust-cache-admin.cjs` and `node diag-all-runtime-integrity.cjs`."
+   Each fix-*.cjs inlines its own SRI bump + mismatch check rather than calling
+   the canonical tooling (and produces no `*.manifest.json`).
+
+JUDGEMENT CALLS (smells):
+
+- Shotgun Surgery / Duplicated Code: the SRI recompute + index.html bump +
+  verify block is copy-pasted across fix-context-usage.cjs, fix-remove-proton-
+  refs.cjs, fix-in-app-conn-modal.cjs, fix-mic-promptbar.cjs (~80 lines each).
+- Duplicated Code: Web Speech API handling duplicated between
+  lumo-dictation-bridge.js and fix-mic-promptbar.cjs chunk injection (same SR
+  detection, same `continuous:true,interimResults:true,lang:navigator.language`,
+  same `textarea.tiptap, .tiptap.ProseMirror` query, same React setter trick).
+  Two competing mic handlers attach to the same button.
+- Mysterious Name / Primitive Obsession: `window.__lumoModelMeta`,
+  `__lumoModelContext`, `__lumoDictationBridge`, `__lumoMicStyle` — global
+  window-namespace pollution standing in for React state.
+- Primitive Obsession: fix-in-app-conn-modal.cjs `setMsg("OK:"+…) /
+  setMsg("FAIL:"+…)` encodes success/failure as string prefixes.
+- Divergent Change: each fix-*.cjs touches runtime*.js + index.html for
+  unrelated logical changes.
+- Bug (not standards, but flagging): fix-mic-promptbar.cjs line 62
+  `s.call(ta,cur+" [voice recorded]")` — `ta` undefined in scope (should be
+  `ta2`); placeholder text is a dead-end with no transcription. Dead code:
+  `TOOLBAR_CONTAINER_NEW` declared, never used (line 104).
+- Speculative Generality: fix-context-usage.cjs stores full ModelMeta into a
+  window global; only `.contextWindow` is ever read.
+
+NAMING (judgement): AGENTS.md calls dist patches `patch-*.cjs`; new scripts use
+`fix-*.cjs` and skip the manifest-producing patch chain.
+
+---
+Task ID: SPEC-REVIEW
+Agent: Spec Review Sub-Agent
+Task: Matt Pocock two-axis code review — Spec axis
+
+Work Log:
+- Read /home/z/my-project/LumoOS/AGENTS.md (charter), MCP.md (MCP spec),
+  and the worklog user-request trail.
+- Read lumo-server.cjs (2365 lines) — admin config, test-model proxy,
+  catalog, masterkeys, in-app connect/disconnect endpoints, MCP server view.
+- Read mcp-connections.cjs (596 lines) — control plane, connectInApp,
+  validateConnection (discovering state), startConnect OAuth/api_key.
+- Read fix-admin-ui-split.cjs (313 lines) — ZProvPanel/ZUsersPanel/ZMcpPanel,
+  model metadata modal, per-model test/edit/delete.
+- Read fix-remove-proton-refs.cjs (230 lines) — Proton URL/branding removal.
+- Read fix-in-app-conn-modal.cjs (148 lines) — connection modal patch.
+- Read lumo-dist/assets/static/lumo-dictation-bridge.js (139 lines).
+- Read lumo-dist/index.html (title/manifest/dictation-bridge script tag).
+
+Stage Summary:
+
+(a) Missing / partial requirements
+
+1. **OAuth in-app connection BROKEN** (MEDIUM). User spec: "In-app
+   connection cards (replace external HTML setup pages)". mcp-connections.cjs:562
+   returns `authorizeUrl: start.setupUrl` for oauth servers, but
+   startConnect only sets `setupUrl` for api_key (line 347); oauth returns
+   `authorizeUrl` (line 371). So `start.setupUrl` is `undefined`. The modal
+   (fix-in-app-conn-modal.cjs:32) checks `if(j.ok&&j.authorizeUrl)` —
+   since `authorizeUrl` is undefined, it falls into `else if(j.ok)`, prints
+   a misleading "Connected!" and calls `loadMcp()`, but never shows the
+   authorize link. The user cannot complete OAuth flow in-app; the spec
+   goal of replacing external HTML pages for OAuth is unmet.
+
+2. **Cross-device persistence unresolved** (HIGH). User spec: "Database
+   persistence (conversations survive reload + cross-device)". Same-device
+   works; cross-device does not. lumo-server.cjs:822-833 comment says
+   "returning eligibility=1" but the code returns `Eligibility: 0` —
+   comment/code mismatch. The worklog (lines 1710-1721) records the
+   unresolved PGP-encryption blocker that prevents the client from
+   creating conversations cross-device.
+
+3. **Model settings modal output types not editable** (LOW). User spec:
+   "model settings modal (context window, max output, input/output types)".
+   Per worklog the modal locks Output types to Text only; only Input types
+   (Text/Image/Video/PDF) are checkboxes. Output type editing is display-only.
+
+4. **Catalog Status spec drift** (LOW). MCP.md:137-140 enumerates Status
+   values: `ready, authorizing, needs_reauth, failed, unavailable,
+   not_discovered, available, revoked` — does not include `discovering`.
+   mcp-connections.cjs:243-258 can return `discovering` in the catalog
+   (set at line 286), an undocumented state.
+
+5. **State-machine comment out of date** (LOW). mcp-connections.cjs:22-25
+   documents `available → authorizing → connected → ready`, omitting the
+   `discovering` transition the user explicitly requested. Code at line 286
+   does set `discovering`; the comment was not updated.
+
+6. **CONTROL_SYSTEM_NOTE status list incomplete** (LOW). mcp-connections.cjs:45
+   tells the model only `available, authorizing, ready, failed, needs_reauth,
+   revoked` — missing `discovering, unavailable, not_discovered, disabled`.
+
+(b) Scope creep / unrequested behaviour
+
+1. **fix-remove-proton-refs.cjs returns `"#"` from URL builders** (lines 53,
+   58). This broke the app (white screen — `new URL("#")` throws); per
+   worklog a follow-up `fix-remove-proton-refs2.cjs` was needed to swap
+   `return"#"` → `return window.location.origin+e`. The committed patch
+   is a known-broken half-change. AGENTS.md:22 requires SRI=0 (met) but
+   no functional smoke-test before commit.
+
+2. **lumo-dictation-bridge.js polling timeouts** (lines 136-138): three
+   hard-coded `setTimeout(hookMicButton, 1000/3000/5000)` calls — redundant
+   with the MutationObserver on line 128. Defensive but not requested.
+
+(c) Implemented but wrong
+
+1. **`connectInApp` oauth path** (mcp-connections.cjs:558-563): the
+   `authorizeUrl: start.setupUrl` is a wrong-field reference (see (a)1).
+   Should read `start.authorizeUrl`.
+
+2. **Modal close-button fallback** (fix-in-app-conn-modal.cjs:41): uses
+   a Unicode `✕` (U+2715) when `%ICON%` is undefined, violating the
+   "Native Lucide icons (not emoji)" user spec. `%ICON%` is always bound
+   today, so the fallback is dead code, but it is a latent regression risk.
+
+3. **Stale VERSION constants** in patch scripts (fix-admin-ui-split.cjs:25
+   `v=47`, fix-in-app-conn-modal.cjs:13 `v=50`, fix-remove-proton-refs.cjs:22
+   `v=48`) — the live cache version is `?v=59`. Re-running any of these
+   scripts today would silently downgrade the cache bust, desyncing the
+   SRI chain. Not a spec violation but a maintenance hazard for the
+   "run patch chain + diag after any rebuild" rule in AGENTS.md:22-23.
+
+Verdict: most user-requested features are implemented; the two material
+spec gaps are (a)1 (OAuth in-app modal does not work) and (a)2
+(cross-device persistence blocker). The rest are documentation drift,
+a wrong-field bug, and maintenance hygiene.
