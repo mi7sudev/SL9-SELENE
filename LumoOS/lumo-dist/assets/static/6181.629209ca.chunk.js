@@ -1,0 +1,2 @@
+"use strict";(globalThis.webpackChunkproton_lumo=globalThis.webpackChunkproton_lumo||[]).push([[6181],{86181(t,e,a){a(31085),a(14041);var l=a(32461),s=a.n(l);a(6780);let o=async t=>{let e,a=await s().loadAsync(t),l=Object.keys(a.files).filter(t=>/\.(jpe?g|png)$/i.test(t)).sort().at(0);return l&&(e=await a.files[l].async("blob")),{cover:l,file:e}};a.d(e,["getCBZCover",0,o])}}]);
+//# sourceMappingURL=6181.629209ca.chunk.js.map

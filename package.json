@@ -3,7 +3,7 @@
   "version": "0.2.1",
   "private": true,
   "scripts": {
-    "dev": "LUMO_PORT=3000 LUMO_DIST_DIR=/home/z/my-project/LumoOS/lumo-dist LUMO_DATA_DIR=/home/z/my-project/LumoOS/data node /home/z/my-project/LumoOS/lumo-server.cjs 2>&1 | tee dev.log",
+    "dev": "node LumoOS/lumo-server.cjs",
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint .",

@@ -1,0 +1,49 @@
+// Helper: apply the remaining ZProvPanel return-statement replacements
+// to fix-admin-ui-split.cjs (model modal + context badge + add button).
+const fs = require('fs');
+const p = '/home/z/my-project/LumoOS/fix-admin-ui-split.cjs';
+let s = fs.readFileSync(p, 'utf8');
+let changes = 0;
+
+// 1. Replace the "addModel" input section with an Add Model button
+// Find from "zap-add-model" to the closing of that flex div
+const addOld = '(0,a.jsx)(%INPUT%.Ay,{id:"zap-add-model",label:"Add a model manually",placeholder:"provider/model-id",value:addModel,assistContainerClassName:"hidden",onChange:function(e){return setAddModel(e.target.value)},onKeyDown:function(e){if(e.key==="Enter")addManual()},className:"flex-1"}),(0,a.jsx)(%BTN%.$,{color:"norm",size:"small",disabled:!addModel.trim(),onClick:addManual,className:"mb-2 shrink-0",children:"Add"})';
+const addNew = '(0,a.jsx)(%BTN%.$,{shape:"outline",size:"small",onClick:openAddModel,children:"+ Add model"})';
+if (s.includes(addOld)) { s = s.replace(addOld, addNew); changes++; console.log('OK: replaced add-model input'); }
+else console.log('SKIP: add-model input not found');
+
+// 2. Replace model header + list (from "cur.models.length+ total" to the closing of zap-mlist)
+// Find the old header with just "total" and no add button
+const hdrOld = '(0,a.jsx)("span",{className:"color-weak text-sm",children:cur.models.length+" total"})]}),cur.models.length===0?(0,a.jsx)("span",{className:"color-weak text-sm",children:"No models yet — use Fetch model list, or add one below."}):(0,a.jsx)("div",{className:"zap-mlist",children:cur.models.map(function(id,mi){var tr=testRes[id];return editIdx===mi?(0,a.jsxs)("div",{className:"zap-mrow",style:{background:"var(--primary-minor-1,rgba(109,74,255,.12))",borderRadius:8,paddingLeft:8,paddingRight:8},children:[(0,a.jsx)("input",{className:"zap-mrow-edit",style:{background:"var(--background-norm)",border:"1px solid var(--border-weak)",borderRadius:6,padding:"4px 8px",color:"var(--text-norm,#fafafa)",font:"inherit",fontSize:".9em",outline:"none"},value:editVal,onChange:function(e){return setEditVal(e.target.value)},onKeyDown:function(e){if(e.key==="Enter")saveEdit();if(e.key==="Escape")cancelEdit()},autoFocus:!0}),(0,a.jsx)("button",{type:"button",className:"zap-ibtn",onClick:saveEdit,title:"Save",children:"\\u2713"}),(0,a.jsx)("button",{type:"button",className:"zap-ibtn",onClick:cancelEdit,title:"Cancel",children:"\\u2715"})]},id+"-edit"):(0,a.jsxs)("div",{className:"zap-mitem",children:[(0,a.jsxs)("div",{className:"zap-mrow",children:[(0,a.jsx)("span",{className:"zap-mrow-id",title:id,children:id}),(0,a.jsx)("button",{type:"button",className:"zap-ibtn",onClick:function(){return testModel(mi)},title:"Test connection",disabled:testingModel===id,children:testingModel===id?"\\u23F3":"\\u{1F50C}"}),(0,a.jsx)("button",{type:"button",className:"zap-ibtn",onClick:function(){return startEdit(mi)},title:"Edit",children:"\\u270E"}),(0,a.jsx)("button",{type:"button",className:"zap-ibtn zap-ibtn-dng",onClick:function(){return delModel(mi)},title:"Delete",children:"\\u{1F5D1}"})]},id),tr&&!tr.testing?(tr.ok?(0,a.jsx)("span",{className:"zap-test zap-test-ok",children:"\\u2713 "+tr.msg}):(0,a.jsx)("span",{className:"zap-test zap-test-fail",title:tr.msg,children:"\\u2717 "+tr.msg})):null]},id)})})]})';
+
+const hdrNew = '(0,a.jsxs)("div",{className:"flex flex-row flex-nowrap gap-2",children:[(0,a.jsx)("span",{className:"color-weak text-sm",children:cur.models.length+" total"}),(0,a.jsx)(%BTN%.$,{shape:"outline",size:"small",onClick:openAddModel,children:"+ Add model"})]})]}),cur.models.length===0?(0,a.jsx)("span",{className:"color-weak text-sm",children:"No models yet — use Fetch model list or Add model."}):(0,a.jsx)("div",{className:"zap-mlist",children:cur.models.map(function(id,mi){var tr=testRes[id];var meta=getMeta(id);var ctxLbl=meta.contextWindow?meta.contextWindow>=1000?(meta.contextWindow/1000)+"K":String(meta.contextWindow):"";return(0,a.jsxs)("div",{className:"zap-mitem",children:[(0,a.jsxs)("div",{className:"zap-mrow",children:[(0,a.jsx)("span",{className:"zap-mrow-id",title:id,children:id}),ctxLbl?(0,a.jsx)("span",{style:{flexShrink:0,fontSize:".75em",padding:"2px 6px",borderRadius:4,background:"var(--background-weak)",color:"var(--text-weak)"},children:ctxLbl}):null,(0,a.jsx)("button",{type:"button",className:"zap-ibtn",onClick:function(){return testModel(mi)},title:"Test connection",disabled:testingModel===id,children:testingModel===id?"\\u23F3":"\\u{1F50C}"}),(0,a.jsx)("button",{type:"button",className:"zap-ibtn",onClick:function(){return openEditModel(mi)},title:"Edit",children:"\\u270E"}),(0,a.jsx)("button",{type:"button",className:"zap-ibtn zap-ibtn-dng",onClick:function(){return delModel(mi)},title:"Delete",children:"\\u{1F5D1}"})]},id),tr&&!tr.testing?(tr.ok?(0,a.jsx)("span",{className:"zap-test zap-test-ok",children:"\\u2713 "+tr.msg}):(0,a.jsx)("span",{className:"zap-test zap-test-fail",title:tr.msg,children:"\\u2717 "+tr.msg})):null]},id)})})]})';
+
+if (s.includes(hdrOld)) { s = s.replace(hdrOld, hdrNew); changes++; console.log('OK: replaced model header + list'); }
+else console.log('SKIP: model header + list not found');
+
+// 3. Add modalEl definition before msgEl
+const modalDef = 'var modalEl=modelModal?(0,a.jsxs)("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16},onClick:closeModelModal,children:[(0,a.jsxs)("div",{onClick:function(e){e.stopPropagation()},style:{background:"var(--background-norm,#fff)",borderRadius:12,padding:24,maxWidth:480,width:"100%",maxHeight:"90vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,.3)"},children:[(0,a.jsxs)("div",{className:"flex flex-row flex-nowrap items-center justify-space-between mb-4",children:[(0,a.jsx)("span",{className:"text-bold text-lg",children:modelModal.editing?"Edit model settings":"Add model"}),(0,a.jsx)("button",{type:"button",onClick:closeModelModal,style:{border:0,background:"transparent",cursor:"pointer",color:"var(--text-weak)",fontSize:20},children:"\\u2715"})]}),(0,a.jsx)(%INPUT%.Ay,{id:"zap-mm-id",label:"Model ID",placeholder:"provider/model-name",value:modelModal.id,assistContainerClassName:"hidden",onChange:function(e){return setModelModal(Object.assign({},modelModal,{id:e.target.value}))}}),(0,a.jsx)(%INPUT%.Ay,{id:"zap-mm-ctx",label:"Context window (tokens)",placeholder:"e.g. 128000",type:"number",value:modelModal.contextWindow,assistContainerClassName:"hidden",onChange:function(e){return setModelModal(Object.assign({},modelModal,{contextWindow:e.target.value}))}}),(0,a.jsx)(%INPUT%.Ay,{id:"zap-mm-max",label:"Max output tokens",placeholder:"e.g. 4096",type:"number",value:modelModal.maxOutput,assistContainerClassName:"hidden",onChange:function(e){return setModelModal(Object.assign({},modelModal,{maxOutput:e.target.value}))}}),(0,a.jsxs)("div",{className:"flex flex-column gap-2 mt-4",children:[(0,a.jsx)("span",{className:"text-semibold text-sm",children:"Input types"}),(0,a.jsxs)("div",{className:"flex flex-row flex-wrap gap-2",children:["text","image","video","pdf"].map(function(t){var on=modelModal.inputTypes.indexOf(t)!==-1;return(0,a.jsxs)("label",{className:"zap-chip"+(on?" zap-chip-on":""),style:{cursor:t==="text"?"default":"pointer",opacity:t==="text"?0.7:1},children:[(0,a.jsx)("input",{type:"checkbox",checked:on,disabled:t==="text",onChange:function(){setModelModal(Object.assign({},modelModal,{inputTypes:on?modelModal.inputTypes.filter(function(x){return x!==t}):modelModal.inputTypes.concat([t])}))}}),(0,a.jsx)("span",{children:t+(t==="text"?" (locked)":"")})]},t)})})]}),(0,a.jsxs)("div",{className:"flex flex-column gap-2 mt-4",children:[(0,a.jsx)("span",{className:"text-semibold text-sm",children:"Output types"}),(0,a.jsxs)("div",{className:"flex flex-row flex-wrap gap-2",children:["text"].map(function(t){return(0,a.jsxs)("label",{className:"zap-chip zap-chip-on",style:{cursor:"default",opacity:0.7},children:[(0,a.jsx)("input",{type:"checkbox",checked:!0,disabled:!0}),(0,a.jsx)("span",{children:t+" (locked)"})]},t)})})]}),(0,a.jsxs)("div",{className:"flex flex-row flex-nowrap items-center justify-end gap-2 mt-6",children:[(0,a.jsx)(%BTN%.$,{shape:"ghost",size:"small",onClick:closeModelModal,children:"Cancel"}),(0,a.jsx)(%BTN%.$,{color:"norm",size:"small",disabled:!modelModal.id.trim(),onClick:saveModelModal,children:"Save"})]})]})]}):null;';
+const insertBefore = 'var msgEl=msg?';
+if (s.includes(insertBefore) && !s.includes('var modalEl=modelModal?')) {
+    s = s.replace(insertBefore, modalDef + '\n' + insertBefore);
+    changes++; console.log('OK: added modalEl definition');
+} else if (s.includes('var modalEl=modelModal?')) {
+    console.log('SKIP: modalEl already defined');
+} else {
+    console.log('SKIP: msgEl not found');
+}
+
+// 4. Add modalEl to the return JSX (before the save footer)
+const footOld = '(0,a.jsxs)("div",{className:"flex flex-row flex-nowrap items-center gap-2",children:[(0,a.jsx)("span",{className:"color-weak text-sm flex-1",children:"Changes apply to everyone on this instance."})';
+const footNew = 'modalEl,(0,a.jsxs)("div",{className:"flex flex-row flex-nowrap items-center gap-2",children:[(0,a.jsx)("span",{className:"color-weak text-sm flex-1",children:"Changes apply to everyone on this instance."})';
+if (s.includes(footOld) && !s.includes('modalEl,(0,a.jsxs)("div",{className:"flex flex-row flex-nowrap items-center gap-2"')) {
+    s = s.replace(footOld, footNew);
+    changes++; console.log('OK: added modalEl to return');
+} else if (s.includes('modalEl,(0,a.jsxs)("div",{className:"flex flex-row flex-nowrap items-center gap-2"')) {
+    console.log('SKIP: modalEl already in return');
+} else {
+    console.log('SKIP: footer not found');
+}
+
+fs.writeFileSync(p, s);
+console.log(`Done. ${changes} changes applied.`);
