@@ -1655,3 +1655,77 @@ Stage Summary:
 - ✅ Removed the hacky lumo-mic-inject.js (which created a separate button)
 - ✅ The SPA's native mic button is now visible and functional on desktop + mobile
 - Cache version: ?v=59. All 45 tests pass. Zero console errors.
+
+---
+Task ID: lumoos-persistence-debug
+Agent: main (Z.ai Code)
+Task: Fix database persistence issue (conversations disappear on reload + cross-device)
+
+Work Log:
+- User reported: conversations/projects disappear on page reload, and data
+  doesn't sync across devices.
+- Investigation:
+  1. Server-side storage IS working: SQLite stores spaces, conversations,
+     messages with encrypted data. Verified 5+ spaces with conversations.
+  2. The client IS fetching spaces from the server (GET /api/lumo/v1/spaces
+     returns 200 with data).
+  3. Added SpaceTag/ConversationTag/MessageTag fields to the server response
+     (the client's parser requires these).
+  4. Filtered out spaces with null Encrypted/SpaceKey (caused parser errors).
+  5. Flattened the spaces response (removed Space/Conversation/Asset wrappers
+     — the client's parser expects flat objects, not wrapped).
+
+- ROOT CAUSE IDENTIFIED:
+  The Proton Lumo client uses PGP encryption for ALL data storage:
+  1. User has PGP keys (generated during Proton account signup)
+  2. Client generates a masterkey and encrypts it with the PGP public key
+  3. Client POSTs the encrypted masterkey to /api/lumo/v1/masterkeys
+  4. All conversation data is encrypted with the masterkey before sending
+  5. The server stores encrypted data; only the client can decrypt it
+
+  Our server returns:
+  - /api/core/v4/keys → { Keys: [] } (no PGP keys)
+  - /api/core/v4/addresses → addresses with HasKeys: 0 (no PGP keys)
+  - /api/lumo/v1/masterkeys → { Eligibility: 0, MasterKeys: [] }
+
+  Without PGP keys, the client:
+  - CAN generate a LOCAL masterkey (stored in localStorage)
+  - CAN encrypt data with it
+  - CAN send encrypted data to the server
+  - CAN decrypt on the SAME device (same localStorage key)
+  - CANNOT decrypt on a DIFFERENT device (different localStorage key)
+  - BUT: the send flow appears to be blocked because the client's
+    space/conversation creation requires the masterkey flow to complete
+    (which needs PGP keys for the POST masterkey step)
+
+- Fixes applied (partial):
+  1. Added SpaceTag/ConversationTag/MessageTag to all server responses
+  2. Filtered out spaces with null Encrypted/SpaceKey
+  3. Flattened the spaces response structure
+  4. Implemented masterkeys POST endpoint (stores masterkey per user)
+  5. Tried Eligibility=0 (eligible, requires PGP) and Eligibility=1 (not eligible)
+  6. Neither fully works because the client's send flow is blocked by the
+     encryption requirement
+
+- REMAINING ISSUE (requires further work):
+  The client won't create conversations without completing the masterkey
+  flow, which requires PGP keys. Two possible approaches:
+  A. Generate PGP keys for each user during signup (correct Proton approach
+     but complex — requires openpgp.js key generation, key storage, etc.)
+  B. Patch the client chunks to bypass the encryption requirement (simpler
+     but fragile — the client's encryption is deeply integrated)
+
+  The server-side infrastructure is correct: spaces, conversations, messages
+  are stored and retrieved properly. The issue is purely client-side:
+  the client's encryption requirement prevents it from creating new data.
+
+Stage Summary:
+- Server-side persistence: WORKING (spaces/conversations/messages stored in SQLite)
+- SpaceTag/ConversationTag/MessageTag: ADDED to all responses
+- Flattened spaces response structure: FIXED
+- Null space filtering: FIXED
+- Masterkeys endpoint: IMPLEMENTED (GET + POST)
+- CLIENT-SIDE BLOCKER: The client's PGP encryption requirement prevents
+  conversation creation without PGP keys. This is a known issue that
+  requires either PGP key generation or client-side patching.
+- All 45 tests pass. Server running on port 3000.
