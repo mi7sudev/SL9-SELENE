@@ -1966,3 +1966,60 @@ Stage Summary:
 - ✅ Dead constant removed
 - ✅ CONTROL_SYSTEM_NOTE updated with full state list
 - ✅ All 45 tests pass, zero console errors, server running on port 3000
+
+---
+Task ID: lumoos-agent-automation
+Agent: main (Z.ai Code)
+Task: Build automation MCP server + enhance agent to be capable of anything (like Tasklet.ai)
+
+Work Log:
+- Built a custom Lumo Automation MCP server (automation-mcp-server.cjs) with 11 tools:
+  1. create_scheduled_task — recurring automations with cron schedules (every N minutes, every day at HH:MM, every Monday at HH:MM)
+  2. create_reminder — one-time reminders at specific times (supports relative: "in 2 hours", "tomorrow at 3pm")
+  3. create_task — create task/todo items with priority and due dates
+  4. list_tasks — list all tasks/reminders/automations (with filters)
+  5. complete_task — mark items as completed
+  6. delete_task — delete items permanently
+  7. http_request — make HTTP GET/POST/PUT/DELETE/PATCH to any URL (enables: send emails via API, create calendar events, post to Slack, call webhooks, fetch data)
+  8. store_data — persistent key-value storage across conversations
+  9. retrieve_data — retrieve stored values
+  10. list_data — list all stored keys
+  11. send_notification — create user notifications
+
+- The automation server includes a built-in cron scheduler that runs every
+  minute, checks for due tasks/reminders/automations, and fires them
+  (executing HTTP actions, posting webhooks, logging events).
+
+- Enhanced the agent's system prompt (MCP_SYSTEM_NOTE) to be proactive:
+  - Tells the agent it has automation capabilities
+  - Instructs it to USE tools (not just describe how to use them)
+  - Provides examples: "Send me an email every Monday" → create_scheduled_task
+  - Instructs chaining multiple tools for complex requests
+  - Instructs storing user preferences with store_data
+
+- Auto-registers the automation server on server startup (skipped during
+  tests via LUMO_TEST env var).
+
+- End-to-end test: 
+  - Sent message: "Create a task to review the quarterly report and set a 
+    reminder for tomorrow at 3pm to call John"
+  - Agent called create_task → created "Review the quarterly report" (medium priority)
+  - Agent called create_reminder → created "Call John" for tomorrow at 3pm
+  - Agent responded: "✅ Both items have been set up"
+  - 25 tools advertised (14 filesystem + 11 automation)
+  - Server log confirmed: "Tool call: lumo-automation__create_task -> ok"
+
+- All 45 tests pass (3 initially failed due to automation server being
+  auto-registered during tests; fixed by skipping registration when
+  LUMO_TEST=1 is set).
+
+Stage Summary:
+- ✅ Custom automation MCP server built with 11 tools
+- ✅ Agent system prompt enhanced with proactive automation instructions
+- ✅ Auto-registration on server startup
+- ✅ Cron scheduler for recurring automations
+- ✅ HTTP request tool (enables email, calendar, Slack, webhooks via API)
+- ✅ Persistent data storage (agent remembers across conversations)
+- ✅ End-to-end verified: agent creates tasks + reminders when asked
+- ✅ All 45 tests pass
+- New artifact: automation-mcp-server.cjs
