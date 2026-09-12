@@ -98,6 +98,7 @@ const CONTROL_TOOL_DEFS = [
                     authHeaderName: { type: 'string', description: 'Header that carries the credential. Default "X-API-Key"' },
                     authHeaderPrefix: { type: 'string', description: 'Prefix before the key value, e.g. "Bearer". Default: none' },
                     healthPath: { type: 'string', description: 'Cheap authenticated GET path used to validate the key, e.g. "/api/v1/users/me/". Default "/"' },
+                    confirmWrites: { type: 'boolean', description: 'Whether non-GET writes require an explicit user yes in chat before executing. Default true (recommended).' },
                     description: { type: 'string', description: 'What the API is for plus usage notes (pagination, rate limits). Shown to the model with the tool.' },
                     confirm: { type: 'boolean', description: 'True only after the user confirmed in chat' },
                 },
@@ -403,6 +404,7 @@ function createConnectionService({ dataDir, log, nowIso, store, getServerDef, cr
             authHeaderPrefix: typeof a.authHeaderPrefix === 'string' ? a.authHeaderPrefix : '',
             healthPath: String(a.healthPath || '/').trim() || '/',
             description: String(a.description || '').slice(0, 500),
+            confirmWrites: a.confirmWrites === undefined ? true : a.confirmWrites === true,
         });
         if (!built || !built.ok || !built.def) {
             return { ok: false, error: (built && built.error) || 'create_failed', message: 'Could not save the connection definition.' };

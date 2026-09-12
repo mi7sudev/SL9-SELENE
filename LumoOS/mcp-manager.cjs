@@ -138,6 +138,9 @@ function normalizeEntry(entry) {
         out.allowedMethods = Array.from(new Set(allowed.length ? allowed : ['GET']));
         out.healthPath = typeof entry.healthPath === 'string' && entry.healthPath.trim() ? entry.healthPath.trim() : '/';
         out.description = typeof entry.description === 'string' ? entry.description.slice(0, 500) : '';
+        // approval before impact: non-GET writes wait for an explicit user yes
+        // in chat unless the admin explicitly disabled per-write confirmation
+        out.confirmWrites = entry.confirmWrites !== false;
         // REST default: bare key in the configured header (unlike MCP http,
         // whose default is "Authorization: Bearer …")
         if (entry.authHeaderPrefix === undefined && out.auth === 'api_key') out.authHeaderPrefix = '';

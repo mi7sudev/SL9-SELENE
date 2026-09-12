@@ -181,6 +181,7 @@ async function createRestServerDef(input) {
         allowedMethods: Array.from(new Set(methods)),
         healthPath: String(input.healthPath || '/').trim() || '/',
         description: String(input.description || '').slice(0, 500),
+        confirmWrites: input.confirmWrites === undefined ? true : input.confirmWrites === true,
         toolPermissions: { api_request: 'on' },
         createdAt: nowIso(),
     };
@@ -303,6 +304,7 @@ function restToolSchema(entry) {
             query: { type: 'object', description: 'Optional query parameters (e.g. pagination cursor)', additionalProperties: true },
             body: { type: 'object', description: 'Optional JSON request body (POST/PUT/PATCH)', additionalProperties: true },
             extraHeaders: { type: 'object', description: 'Optional extra headers. The authentication header is added automatically — never pass it here.', additionalProperties: true },
+            confirm: { type: 'boolean', description: 'For non-GET writes: true only after the user explicitly approved this write in chat. The original request is not the confirmation.' },
         },
         required: ['method', 'path'],
         additionalProperties: false,
@@ -315,6 +317,9 @@ function restToolDescription(entry) {
         entry.description ? `About this API: ${entry.description}` : '',
         'The credential is injected automatically — never ask the user for it and never pass it in extraHeaders.',
         `Allowed methods: ${methods}. Send only the path; paginate with query parameters when the response includes a next/cursor.`,
+        entry.confirmWrites === false
+            ? 'Writes execute immediately (the administrator disabled per-write confirmation for this connection) — still confirm destructive actions with the user.'
+            : 'Non-GET writes wait for the user\'s explicit yes in chat: the first call returns needsConfirmation; ask, then re-issue the identical call with confirm:true.',
     ].filter(Boolean).join(' ');
 }
 // Connect every usable server (best-effort, with a post-failure backoff so a
@@ -1349,6 +1354,7 @@ async function handleLumoData(req, res, rawUrl, uid, body) {
             allowedMethods: entry.allowedMethods || null,
             healthPath: entry.healthPath || '/',
             description: entry.description || '',
+            confirmWrites: entry.confirmWrites !== false,
             envKeys: Object.keys(entry.env || {}),
             trustedLocal: entry.trustedLocal === true,
             toolPermissions: entry.toolPermissions || {},
@@ -1437,6 +1443,9 @@ async function handleLumoData(req, res, rawUrl, uid, body) {
             entry.allowedMethods = Array.from(new Set(methods));
             entry.healthPath = String(input.healthPath ?? (prev && prev.healthPath) ?? '/').trim() || '/';
             entry.description = String(input.description ?? (prev && prev.description) ?? '').slice(0, 500);
+            // approval before impact: writes require an explicit user yes in
+            // chat unless the admin turned per-write confirmation off
+            entry.confirmWrites = input.confirmWrites === undefined ? (prev ? prev.confirmWrites !== false : true) : input.confirmWrites === true;
             // the admin's explicit method allowlist IS the write opt-in for the
             // connection's single governed tool
             entry.toolPermissions = { ...(entry.toolPermissions || {}), api_request: 'on' };
@@ -1877,6 +1886,30 @@ async function handleLumoData(req, res, rawUrl, uid, body) {
         return send(res, r.ok ? 200 : 400, ok(r));
     }
 
+    // ── durable agent runs (audit + history) ─────────────────────────────────
+    // Runs carry status + a redacted tool-call trail — never message content
+    // (messages are end-to-end encrypted by design and stay that way).
+    if (url === `${prefix}/runs` && req.method === 'GET') {
+        const who = activeUserForUid(uid);
+        if (!who) return send(res, 401, { Code: 8002, Error: 'Unauthorized' });
+        const limit = Number(new URL(req.url, 'http://localhost').searchParams.get('limit')) || 50;
+        return send(res, 200, ok({ Runs: store.listRuns(who.entry.uid, limit) }));
+    }
+    const runIdMatch = url.match(/^\/api\/lumo\/v1\/runs\/([^/]+)$/);
+    if (runIdMatch && req.method === 'GET') {
+        const who = activeUserForUid(uid);
+        if (!who) return send(res, 401, { Code: 8002, Error: 'Unauthorized' });
+        const run = store.getRun(decodeURIComponent(runIdMatch[1]));
+        if (!run) return send(res, 404, { Code: 2501, Error: 'Run not found' });
+        if (run.uid !== who.entry.uid && who.entry.role !== 'admin') return send(res, 403, { Code: 8002, Error: 'Forbidden' });
+        return send(res, 200, ok({ Run: run, Events: store.listRunEvents(run.id) }));
+    }
+    if (url === `${adminPrefix}/runs` && req.method === 'GET') {
+        if (!requireAdmin(res, uid)) return true;
+        const limit = Number(new URL(req.url, 'http://localhost').searchParams.get('limit')) || 50;
+        return send(res, 200, ok({ Runs: store.listAllRuns(limit) }));
+    }
+
     return null;
 }
 
@@ -1941,6 +1974,7 @@ SECURITY:
 RESULT HANDLING & RECOVERY (never give up after one try, never fake success):
 - Inspect every tool result before acting on it. Distinguish: valid result; valid-but-empty (re-check pagination, filters, and the identifier before reporting "nothing found"); not found; auth failure (401/403 — the connection needs re-auth: offer the connection tools, never ask for the key in chat); bad request (fix the call — don't repeat it unchanged); method not allowed (405 — use an allowed method); rate limit (429 — wait and retry once); server outage (5xx — retry once, then report the outage); ambiguous result (say so).
 - Retry only transient failures (timeout, 429, 5xx), at most twice with a short pause. Never retry auth or permission failures.
+- When a write returns needsConfirmation, that is the approval gate working: ask the user a clear yes/no question describing exactly what will be written where, wait for the reply, then re-issue the identical call with confirm:true. Never re-issue with confirm:true without an explicit affirmative reply.
 - Before concluding something is impossible, check the full capability surface (lumo__connections_list and your other tools) for another path to the same outcome.
 - After any write (create/update/delete), verify by reading the resource back when the API allows it; report writes you could not verify as "done but unverified".
 - End with an honest status: completed and verified / completed with limitations / not completed, with the exact blocker and the smallest next step the user can take.`;
@@ -2019,7 +2053,45 @@ async function runMcpChatLoop({ req, res, bodyObj, upstreamUrl, forwardHeaders, 
     // In-band abort: a client disconnect must end provider calls and the loop.
     const controller = new AbortController();
     let aborted = false;
-    res.on('close', () => { aborted = true; try { controller.abort(); } catch { /* already aborted */ } });
+    res.on('close', () => {
+        aborted = true;
+        finishRun('aborted', 'client disconnected');
+        try { controller.abort(); } catch { /* already aborted */ }
+    });
+
+    // ── durable run record ────────────────────────────────────────────────────
+    // Every agent chat run is persisted with its final status and a redacted
+    // audit trail of every tool call. Message content is NEVER stored here —
+    // messages are end-to-end encrypted by design and the runtime keeps it
+    // that way (no conversation ids, no plaintext, only the tool trail).
+    const runDoc = {
+        id: `run-${crypto.randomBytes(8).toString('hex')}`,
+        uid: loop.uid,
+        status: 'running',
+        model: String(bodyObj && bodyObj.model ? bodyObj.model : ''),
+        startedAt: nowIso(),
+        finishedAt: null,
+        rounds: 0,
+        toolCalls: 0,
+        error: null,
+    };
+    loop.runId = runDoc.id;
+    let runFinished = false;
+    function finishRun(status, error) {
+        if (runFinished) return;
+        runFinished = true;
+        runDoc.status = status;
+        runDoc.finishedAt = nowIso();
+        if (error) runDoc.error = String(error).slice(0, 300);
+        try { store.upsertRun(runDoc); } catch (e) { mcpLog(`[run] persist failed: ${e.message}`); }
+    }
+    // audit events must never break the loop or the response
+    function runEvent(type, fields) {
+        try {
+            store.upsertRunEvent({ id: `evt-${crypto.randomBytes(8).toString('hex')}`, runId: runDoc.id, uid: loop.uid, type, createdAt: nowIso(), ...fields });
+        } catch { /* audit is best-effort */ }
+    }
+    try { store.upsertRun(runDoc); } catch (e) { mcpLog(`[run] persist failed: ${e.message}`); }
 
     const writeFrame = (s) => { if (!aborted) res.write(s); };
     const sendText = (text) => writeFrame(sseText(text));
@@ -2035,6 +2107,7 @@ async function runMcpChatLoop({ req, res, bodyObj, upstreamUrl, forwardHeaders, 
     }
 
     const forwardError = (upstream, errText) => {
+        finishRun('failed', `upstream ${upstream.status}`);
         if (res.headersSent) {
             // mid-loop failure: the OpenAI-style in-band error object makes the
             // BYOK client raise "Provider returned an error mid-stream"
@@ -2109,6 +2182,8 @@ async function runMcpChatLoop({ req, res, bodyObj, upstreamUrl, forwardHeaders, 
                 if (roundResult.error) {
                     writeFrame(sseFrame({ error: { message: roundResult.error } }));
                 }
+                runDoc.rounds = round;
+                finishRun('completed');
                 res.write('data: [DONE]\n\n');
                 res.end();
                 // Persist the assistant's response (server-side message storage)
@@ -2135,6 +2210,8 @@ async function runMcpChatLoop({ req, res, bodyObj, upstreamUrl, forwardHeaders, 
             for (const tc of roundResult.toolCalls) {
                 const started = Date.now();
                 writeFrame(sseFrame({ choices: [{ index: 0, delta: { zap_tool: { id: tc.id, name: tc.name, status: 'start', args: safeParseJson(tc.argsStr, tc.argsStr ? { _raw: tc.argsStr.slice(0, 2000) } : {}) } } }] }));
+                runDoc.toolCalls++;
+                runEvent('tool_start', { tool: tc.name, argsPreview: mcpManager.redact(String(tc.argsStr || '')).slice(0, 500) });
                 let resultText;
                 let isError = false;
                 let resultPrefix;
@@ -2172,24 +2249,54 @@ async function runMcpChatLoop({ req, res, bodyObj, upstreamUrl, forwardHeaders, 
                                 isError = true;
                                 mcpLog(`[${loop.reqId}] policy refused ${tc.name}: ${pol.code}`);
                             } else {
-                                try {
-                                    if (target.rest) {
-                                        // direct REST API call: credential injected
-                                        // server-side inside callRestTool
-                                        resultText = await mcpManager.callRestTool(target.entry, args, { connection: pol.connection ? { id: pol.connection.id, credential: pol.connection.value } : undefined });
-                                    } else {
-                                        resultText = await mcpManager.callTool(target.entry, target.toolName, args, { connection: pol.connection ? { id: pol.connection.id, credential: pol.connection.value } : undefined });
+                                const isRestWrite = target.rest
+                                    && String(args.method || 'GET').toUpperCase() !== 'GET'
+                                    && target.entry.confirmWrites !== false;
+                                if (isRestWrite && args.confirm !== true) {
+                                    // approval before impact: non-GET writes on
+                                    // confirm-gated REST connections wait for an
+                                    // explicit user yes in chat (same pattern as
+                                    // the connection tools' confirm gate)
+                                    resultText = JSON.stringify({
+                                        ok: false,
+                                        needsConfirmation: true,
+                                        serverId: target.entry.id,
+                                        method: String(args.method).toUpperCase(),
+                                        path: args.path || '/',
+                                        message: `Ask the user to confirm this ${String(args.method).toUpperCase()} to "${target.entry.name}" (${args.path || '/'}) before proceeding. Re-issue the same call with confirm:true only after an explicit affirmative reply; the original request is not the confirmation.`,
+                                    });
+                                    resultPrefix = '[Connection manager result]';
+                                    runEvent('approval_requested', { tool: tc.name, serverId: target.entry.id, detail: { method: String(args.method).toUpperCase(), path: args.path || '/' } });
+                                    mcpLog(`[${loop.reqId}] approval requested: ${tc.name} ${String(args.method).toUpperCase()} ${args.path || '/'}`);
+                                } else {
+                                    try {
+                                        if (isRestWrite) {
+                                            runEvent('approval_granted', { tool: tc.name, serverId: target.entry.id, detail: { method: String(args.method).toUpperCase(), path: args.path || '/' } });
+                                        }
+                                        if (target.rest) {
+                                            // direct REST API call: credential injected
+                                            // server-side inside callRestTool
+                                            resultText = await mcpManager.callRestTool(target.entry, args, { connection: pol.connection ? { id: pol.connection.id, credential: pol.connection.value } : undefined });
+                                        } else {
+                                            resultText = await mcpManager.callTool(target.entry, target.toolName, args, { connection: pol.connection ? { id: pol.connection.id, credential: pol.connection.value } : undefined });
+                                        }
+                                        mcpLog(`[${loop.reqId}] Tool call: ${tc.name} -> ok (${Date.now() - started}ms)`);
+                                    } catch (e) {
+                                        resultText = `Tool error: ${(e && e.message) || 'execution failed'}`;
+                                        isError = true;
+                                        mcpLog(`[${loop.reqId}] Tool call: ${tc.name} -> error:`, resultText);
                                     }
-                                    mcpLog(`[${loop.reqId}] Tool call: ${tc.name} -> ok (${Date.now() - started}ms)`);
-                                } catch (e) {
-                                    resultText = `Tool error: ${(e && e.message) || 'execution failed'}`;
-                                    isError = true;
-                                    mcpLog(`[${loop.reqId}] Tool call: ${tc.name} -> error:`, resultText);
                                 }
                             }
                         }
                     }
                 }
+                runEvent(isError ? 'tool_error' : 'tool_done', {
+                    tool: tc.name,
+                    argsPreview: mcpManager.redact(String(tc.argsStr || '')).slice(0, 500),
+                    durationMs: Date.now() - started,
+                    errorCode: isError ? String(resultText).slice(0, 200) : undefined,
+                });
                 writeFrame(sseFrame({ choices: [{ index: 0, delta: { zap_tool: { id: tc.id, name: tc.name, status: isError ? 'error' : 'done', durationMs: Date.now() - started, result: resultText.slice(0, 4000) } } }] }));
                 // Data-plane results are untrusted external data (framed as
                 // such); control-plane results are server-generated status.
@@ -2202,6 +2309,7 @@ async function runMcpChatLoop({ req, res, bodyObj, upstreamUrl, forwardHeaders, 
         }
     } catch (error) {
         if (aborted) return;
+        finishRun('failed', (error && error.message) || 'loop error');
         mcpLog('[MCP] loop error:', error && (error.name === 'AbortError' ? 'aborted' : error.stack || error));
         if (res.headersSent) {
             writeFrame(sseFrame({ error: { message: `MCP proxy error: ${(error && error.message) || 'unknown'}` } }));

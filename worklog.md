@@ -1,5 +1,20 @@
 
 ---
+Task ID: durable-runs-phase2
+Agent: ZCode (main)
+Task: Durable agent runs + tool audit trail + write-approval gates (Agent OS phase 2)
+
+Work Log:
+- store.cjs: new agent_runs + agent_run_events tables (SCHEMA_SQL append, the established migration mechanism) with prepared upserts + indexed per-user/per-run listing; docs carry full details, key columns back ordering.
+- lumo-server.cjs runMcpChatLoop: every MCP-engaged chat now creates a durable run (id, uid, model, status running→completed/failed/aborted, rounds, toolCalls) finalized idempotently on every exit path (normal completion, round limit, upstream error via forwardError, client abort via the close listener, loop exception). Each tool call emits tool_start + tool_done/tool_error events with redacted args preview, duration, error code. Message content is NEVER stored — messages are E2E encrypted by design and the runtime keeps it that way.
+- Write-approval gate ("approval before impact"): rest defs gained confirmWrites (default TRUE — admin can disable per connection); non-GET api_request calls on a gated connection without args.confirm return the same needsConfirmation shape the connection tools use, the agent asks the user yes/no in chat and re-issues with confirm:true; approval_requested + approval_granted are persisted as audit events. restToolSchema gained the confirm param; tool descriptions + MCP_SYSTEM_NOTE teach the gate.
+- Run history APIs: GET /api/lumo/v1/runs (own), GET /api/lumo/v1/runs/:id (owner or admin, includes events), GET /api/lumo/v1/admin/runs (all users).
+- tests/durable-runs.test.cjs: 20 checks — gated write blocked → user confirms → 201; confirmWrites:false executes immediately; run records completed; event trail (tool_start/approval_requested/approval_granted/tool_done); no secret and no message content in any response; ownership scoping (foreign user 403, empty list); admin list. Phase-1 regression re-run: 23/23.
+- Verified on the live instance: schema migrated on boot, Plane + agent-created rest connections intact.
+
+Result: PHASE 2 COMPLETE — reliable execution core per both specs (durable runs, event log, approval-before-impact, audit trail). Still open for later phases: pause/resume state machine, conversation attribution (needs a client chunk patch), tool factory/sandbox, multi-agent delegation, run replay.
+
+---
 Task ID: rest-connections-phase1
 Agent: ZCode (main)
 Task: Make the Lumo agent actually able to use external REST APIs (Plane.so scenario from the failed conversation)

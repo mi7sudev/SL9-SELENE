@@ -88,6 +88,17 @@ CREATE TABLE IF NOT EXISTS mcp_connections (
     seq INTEGER NOT NULL, doc TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_connections_owner ON mcp_connections (server_id, owner_uid);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id TEXT PRIMARY KEY, uid TEXT NOT NULL, status TEXT NOT NULL,
+    model TEXT, seq INTEGER NOT NULL, doc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_uid ON agent_runs (uid, seq);
+CREATE TABLE IF NOT EXISTS agent_run_events (
+    id TEXT PRIMARY KEY, run_id TEXT NOT NULL, uid TEXT NOT NULL, type TEXT NOT NULL,
+    seq INTEGER NOT NULL, doc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_run_events_run ON agent_run_events (run_id, seq);
 `;
 
 function getMeta(db, key) {
@@ -207,6 +218,21 @@ function buildStore(db) {
     const conversations = buildCollection(db, 'conversations', 'space_id', ['create_time', 'update_time', 'delete_time']);
     const messages = buildCollection(db, 'messages', 'conversation_id', ['create_time', 'delete_time']);
     const assets = buildCollection(db, 'assets', 'space_id', ['create_time', 'delete_time']);
+
+    // ── durable agent runs + audit events ──
+    const runUpsert = db.prepare(
+        'INSERT INTO agent_runs (id, uid, status, model, seq, doc) VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_runs), ?) ' +
+        'ON CONFLICT (id) DO UPDATE SET status = excluded.status, model = excluded.model, doc = excluded.doc',
+    );
+    const runGet = db.prepare('SELECT doc FROM agent_runs WHERE id = ?');
+    const runListForUid = db.prepare('SELECT doc FROM agent_runs WHERE uid = ? ORDER BY seq DESC LIMIT ?');
+    const runListAll = db.prepare('SELECT doc FROM agent_runs ORDER BY seq DESC LIMIT ?');
+    const runEventUpsert = db.prepare(
+        'INSERT INTO agent_run_events (id, run_id, uid, type, seq, doc) VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_run_events), ?) ' +
+        'ON CONFLICT (id) DO UPDATE SET doc = excluded.doc',
+    );
+    const runEventListForRun = db.prepare('SELECT doc FROM agent_run_events WHERE run_id = ? ORDER BY seq');
+    const parseRun = (row) => JSON.parse(row.doc);
 
     const wipeUserDataStmts = [
         'DELETE FROM spaces WHERE uid = ?',
@@ -345,6 +371,28 @@ function buildStore(db) {
         },
         deleteConnectionRecord(id) {
             connDelete.run(String(id));
+        },
+
+        // ── durable agent runs + audit events (docs carry full details; the
+        // key columns back per-user listing and per-run event ordering) ──
+        upsertRun(doc) {
+            runUpsert.run(String(doc.id), String(doc.uid ?? ''), doc.status ?? 'running', String(doc.model ?? ''), JSON.stringify(doc));
+        },
+        getRun(id) {
+            const row = runGet.get(String(id));
+            return row ? parseRun(row) : null;
+        },
+        listRuns(uid, limit) {
+            return runListForUid.all(String(uid), Math.max(1, Math.min(Number(limit) || 50, 200))).map(parseRun);
+        },
+        listAllRuns(limit) {
+            return runListAll.all(Math.max(1, Math.min(Number(limit) || 50, 200))).map(parseRun);
+        },
+        upsertRunEvent(doc) {
+            runEventUpsert.run(String(doc.id), String(doc.runId ?? ''), String(doc.uid ?? ''), String(doc.type ?? 'event'), JSON.stringify(doc));
+        },
+        listRunEvents(runId) {
+            return runEventListForRun.all(String(runId)).map(parseRun);
         },
     };
     return store;

@@ -91,6 +91,17 @@ The agent can call external REST APIs through governed connections:
   `needs_reauth`, never a silent success.
 - **MCP servers still work as before** — stdio/HTTP MCP servers with tool
   discovery, per-user api_key/OAuth connections, tool cards in the UI.
+- **Writes require approval** — on rest connections, POST/PUT/PATCH/DELETE
+  wait for an explicit user yes in chat (`confirmWrites`, default on; the
+  admin can disable per connection). Both the request and the confirmation
+  land in the audit trail.
+- **Every agent run is durable** — each MCP-engaged chat creates a run record
+  (status: running → completed/failed/aborted) plus a redacted audit event
+  per tool call (`tool_start` / `tool_done` / `tool_error` /
+  `approval_requested` / `approval_granted`). Message content is never
+  stored (messages are end-to-end encrypted by design). APIs:
+  `GET /api/lumo/v1/runs`, `GET /api/lumo/v1/runs/:id`,
+  `GET /api/lumo/v1/admin/runs`.
 
 ## Verification checklist (for agents)
 
