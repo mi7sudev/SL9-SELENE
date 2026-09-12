@@ -64,3 +64,24 @@ Stage Summary:
 - Engine session survives client reloads; idle teardown after 5 min transparently relaunches.
 - Key artifacts: LumoOS/browser-engine.cjs, LumoOS/lumo-dist/assets/static/lumo-browser-panel.js (?v=5), lumo-server.cjs routes, verify-1..10 screenshots in /home/z/SL9-SELENE/.
 - Note: mcp-proxy.test.mjs has 3 pre-existing failures unrelated to the browser (fails on clean tree too).
+
+---
+Task ID: lumo-agent-any-mcp
+Agent: Z.ai Code (main)
+Task: Answer "why can't our agent add connections like Plane.so?" and make the Lumo agent able to register + connect ANY MCP server from chat (full automation, admin instance).
+
+Work Log:
+- Root-caused from the user's pasted chat + code: the vendored LumoOS in /home/z/SL9-SELENE had the OLD connection control plane — only 4 lumo__ tools (list/connect/status/disconnect), and CONTROL_SYSTEM_NOTE literally instructed "If nothing matches, tell the user the administrator must add that connection first. Never invent, register, or modify servers." So the agent correctly (per its instructions) refused Plane.so. The auto-connect pipeline from earlier worklog entries existed only in a lost sandbox, never committed.
+- Implemented the generic auto-connect control plane (NOT Plane-specific):
+  - mcp-connections.cjs: +3 control tools (lumo__service_lookup, lumo__server_add, lumo__connection_submit_key), rewrote CONTROL_SYSTEM_NOTE to FULL AUTOMATION POLICY (register servers yourself, accept user-volunteered keys via submit_key verbatim/never echo, connect confirm-free, disconnect keeps confirm, verify "ready" before claiming success), added submitKey() (encrypt -> store -> validateConnection), executeControlTool gained isAdmin param + admin_required gating, connection_status now force-connects auth:none servers so readiness is provable in the same turn.
+  - NEW service-registry.cjs: curated recipes (Plane.so w/ verified endpoint https://mcp.plane.so/http/api-key/mcp + X-Workspace-slug header, Notion, Linear, GitHub, Sentry, Atlassian, Stripe, Cloudflare, Zapier) + graceful found:false guidance so the agent registers anything else itself.
+  - lumo-server.cjs: hoisted mcpServerView/findMcpServer/saveMcpEntry out of handleLumoData to module scope; added registerServerDefCb (reuses EXACT admin save path + withMcpConfigLock; strips agent-supplied id/toolPermissions/trustedLocal; 64-server cap; name+url+command dedupe); createConnectionService gets registerServerDef callback; buildMcpChatLoop gating now defsExist||isAdmin (bootstrap path: admin with zero servers still gets the control plane; non-admin zero-servers stays pure passthrough); loop carries isAdmin into executeControlTool.
+  - tests/mcp-proxy.test.mjs: updated to 7-tool catalog + new zero-servers contract (admin bootstrap vs non-admin passthrough) + new system-note regexes. Suite: 62/62 pass (store 6, mcp-manager 17, mcp-connections 16, mcp-proxy 23).
+  - Docs: AGENTS.md + MCP.md updated to the new control-plane policy (7 tools, admin-gated chat registration, submit_key semantics).
+- Fixed "I don't see anything": :3000 was a dead Next scaffold (preview root 502/blank). Added mini-services/port-bridge (transparent TCP :3000 -> :8090, bun --hot) so the gateway's default route now serves the real Lumo UI from lumo-server.cjs. Root redirects to /guest; signed-in users keep their session.
+
+Stage Summary:
+- E2E PROOF (real LLM glm-4.6 via z-ai bridge, admin chat): "Register Local Echo stdio server" -> lumo__server_add ok (mcp-2ea7ced7) -> status ready w/ tools [echo, fail]; follow-up chat called mcp-2ea7ced7__echo -> "echo: pipeline works" (data plane live). "Connect DeepWiki https://mcp.deepwiki.com/mcp" -> registered (mcp-0324d029) -> status ready w/ ask_question/read_wiki_* tools. "Plane.so" lookup -> exact recipe + agent asks for workspace slug + API key instead of refusing. Test artifact Local Echo deleted; DeepWiki kept (user can "disconnect DeepWiki" anytime).
+- Processes: lumo-server.cjs PID (node, :8090), port-bridge (bun, :3000), lumo-ai-provider (bun, :3040) all running.
+- Browser verified: gateway root renders Lumo UI (guest + signed-in user's own cookie), guest chat round-trips (UI-E2E-OK), native "Used a tool" card rendered, mobile 390x844 OK, no console errors.
+- User must still supply (once) for real Plane: workspace slug + API key in chat — the agent now handles the rest end-to-end.
