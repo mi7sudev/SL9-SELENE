@@ -169,3 +169,25 @@ Stage Summary:
 - Alignment report delivered (4-category classification). Code changes: LumoOS/lumo-server.cjs only (~70 lines), all 63 tests pass, dist untouched (integrity 0 mismatches).
 - Key evidence: Proton source has NO BYOK and NO MCP -> those LumoOS layers are category-2 intentional adaptations by definition; the agent control plane (lumo__server_add, service_lookup, tool_permission, agent-os recovery ladder/tool factory) is fully implemented and live-verified.
 - Proton reference checkout kept at /home/z/proton-webclients-ref for future audits (commit ab7b6184).
+
+---
+Task ID: browser-harness-agent-tools
+Agent: main (Z.ai Code)
+Task: User reported the agent claims it "cannot open a browser" — the agent must have complete access to the entire harness including the side-panel browser (DeepSeek-harness-inspired full autonomy with user-visible confirmation).
+
+Work Log:
+- Diagnosed the gap: browser-engine.cjs (Playwright multi-tab Chromium) + panel routes (/api/lumo/v1/browser/*) existed, but ZERO tools in the agent's chat catalog — the model could never drive the user-visible browser.
+- browser-engine.cjs: added read() op (PAGE_READ_SNIPPET in-page extraction: visible text + interactive elements a/button/input/[role] with (x,y) viewport centers, 80-element cap, 500-16000 char text cap) — the agent-eyes primitive.
+- NEW agent-os/browser-tools.cjs: 5 tools (lumo__browser_navigate/read/action/tabs/status) + BROWSER_SYSTEM_NOTE ("NEVER say you cannot open or control a browser", coordinate-click workflow, write-confirm rule, untrusted-page-content rule, honest unavailable fallback); executeControlTool returns null for non-browser names; available() gates advertisement.
+- agent-tools.cjs: createAgentTools accepts browserTools, dispatches browser names first, exposes BROWSER_TOOL_DEFS + BROWSER_SYSTEM_NOTE.
+- capability-registry.cjs: 5 browser runtime builtins so lumo__capabilities_search discovers them.
+- lumo-server.cjs: createBrowserTools with lazy engine getter (engine assigned later in module body); advertised only when engine usable; loop.hasBrowser; BROWSER_SYSTEM_NOTE appended to system note; '[Browser result]' result prefix.
+- Panel v7 (lumo-browser-panel.js + index.html ?v=7): agent-driven auto-open — FIRST attempt inside renderSnapshot was a dead loop (renderSnapshot early-returns when panel UI unmounted, which is exactly when the drawer is closed); moved to pollTick where snapshots always flow. Guards: 15s per agent burst, 12s user-close grace (wasDrawerVisible transition tracking). Badge shows+pulses on fresh (<5s) engine actions. ACT_LABELS + read.
+- tests/mcp-proxy.test.mjs: dynamic BR delta (browserEngineForCount.status().available ? 5 : 0) in 4 count assertions + expected control-tool list extension.
+- Verification: full suite 63/63 (store 6, mcp-manager 17, mcp-connections 17, mcp-proxy 23); /home/z/SL9-SELENE/tool-results/verify-browser-tools.mjs 12/12 (spawned server + stub: catalog advertisement, system note, navigate round-trip ok:true example.com, [Browser result] framing, read returns "Example Domain" + element coordinates).
+- Production restart (PID 22927 on :8090 behind port-bridge :3000); live UI E2E via agent-browser (admin/Selene#2025!): "open https://example.com in the browser" -> browser_navigate executed, agent READ page and described heading/link/tab id; drawer AUTO-OPENED with live frame + ACTIVITY log; follow-up "open https://iana.org in a new browser tab" -> 2 tabs live in panel, page described; mobile 390x844 chat + drawer overlay verified. Committed 2bba254.
+
+Stage Summary:
+- The agent now has COMPLETE harness control of the side-panel browser: navigate/read/act/tabs/status, user sees everything live (auto-open), honest errors when engine unavailable. The exact reported failure ("open the plane on the browser" -> refusal) is fixed and proven in the real product with real LLM + real Chromium.
+- Key bug caught by E2E: auto-open must live in pollTick, not renderSnapshot (unmounted-UI early return). Panel cache-busted to ?v=7.
+- Artifacts: LumoOS/agent-os/browser-tools.cjs, tool-results/verify-browser-tools.mjs, screenshots bt-1..bt-6 in /home/z/SL9-SELENE/.
