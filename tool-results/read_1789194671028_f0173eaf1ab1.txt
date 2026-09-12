@@ -1,0 +1,547 @@
+     1→     1→# Agent Browser Side-Panel — Implementation Spec & Handoff
+     2→     2→
+     3→     3→> **Audience:** an AI agent tasked with replicating this feature on the same (or a similar)
+     4→     4→> self-hosted Proton **Lumo** deployment.
+     5→     5→> **Status:** implemented, committed as `6403a55` ("Browser v3: multi-tab side-panel browser").
+     6→     6→> **Canonical sources (read these for exact code):**
+     7→     7→> - `LumoOS/lumo-dist/assets/static/lumo-browser-panel.js` — the entire frontend (760 lines, IIFE)
+     8→     8→> - `LumoOS/browser-engine.cjs` — headless multi-tab engine (359 lines)
+     9→     9→> - `LumoOS/lumo-server.cjs` — HTTP route wiring (search for `/browser/status`, ~line 1819)
+    10→    10→> - `LumoOS/lumo-dist/index.html` — one script tag, cache-bust version
+    11→    11→>
+    12→    12→> This document is the spec + rationale. Where snippets are shown, they are copied from the
+    13→    13→> real implementation.
+    14→    14→
+    15→    15→---
+    16→    16→
+    17→    17→## 1. What was built (one paragraph)
+    18→    18→
+    19→    19→Lumo's header has a **files button** (`button.drawer-toggle-button`) that opens a right-side
+    20→    20→drawer (`aside.right-drawer`). The vendor renders a Google-Drive file panel inside it
+    21→    21→("All files in this chat / Add from Drive / Add from computer") with a
+    22→    22→**"Context usage for this conversation"** block pinned at the bottom. We replaced the Drive
+    23→    23→content with a full **Agent Browser**: a multi-tab, interactive, headless-Chromium browser
+    24→    24→(tab strip, per-session URL bar, live screenshot view you can click/scroll/type into,
+    25→    25→Back/Reload, Maximize-to-modal, per-tab close, activity log) — while keeping the vendor
+    26→    26→panel shell (drawer, open/close animation) and the context-usage block 100% intact.
+    27→    27→
+    28→    28→---
+    29→    29→
+    30→    30→## 2. Ground rules (non-negotiable — read first)
+    31→    31→
+    32→    32→1. **Never modify vendored chunks.** All vendor JS (`runtime.*.js`, `pre.*.js`, `index.*.js`,
+    33→    33→   `unsupported.*.js`, numbered chunks like `4124.*.chunk.js`) carries `integrity="sha384-…"`
+    34→    34→   + `crossorigin`. Editing one breaks SRI and the repo's integrity gate. The Drive panel
+    35→    35→   source lives in such a chunk — we do **not** fork it.
+    36→    36→2. **All our frontend code lives in exactly one file** with **no** `integrity` attribute:
+    37→    37→   `assets/static/lumo-browser-panel.js`. Shipping changes = edit that file + bump its
+    38→    38→   `?v=` in `index.html`. That's the whole release surface.
+    39→    39→3. **Zero hardcoded colors.** Every color/radius/shadow is a Proton design token that the
+    40→    40→   vendor CSS already defines: `--primary`, `--primary-minor-2`, `--background-norm`,
+    41→    41→   `--background-weak`, `--border-weak`, `--border-norm`, `--text-norm`, `--text-weak`,
+    42→    42→   `--text-hint`, `--signal-success`, `--signal-danger`, `--border-radius-md/lg`,
+    43→    43→   `--shadow-lifted`. (Fallbacks like `var(--border-radius-md,8px)` are fine.)
+    44→    44→4. **Never touch the context-usage block.** It is the last child of `.files-panel-content`
+    45→    45→   (has class `mt-2`). The code actively re-shows it if anything ever hides it.
+    46→    46→5. **Engine unavailable ⇒ zero footprint.** If the backend reports unavailable, the script
+    47→    47→   injects no style, no DOM, no observers, no polling — it just retries every 8 s.
+    48→    48→6. **Strict takeover contract.** If the vendor panel's DOM shape doesn't match the audited
+    49→    49→   structure, refuse to take over rather than guess (gu = you might hide the wrong thing).
+    50→    50→
+    51→    51→---
+    52→    52→
+    53→    53→## 3. The audited vendor contract (re-audit on YOUR build!)
+    54→    54→
+    55→    55→Before writing any code, open DevTools, click the header files button, and verify the
+    56→    56→rendered structure of the Drive panel. On our build (Drive source = chunk `4124`,
+    57→    57→module `2506`) it is:
+    58→    58→
+    59→    59→```
+    60→    60→aside.right-drawer
+    61→    61→└─ ... 
+    62→    62→   └─ .files-panel-content            ← takeover target (flex column)
+    63→    63→      ├─ [0] header   : class contains "mb-4"   ("All files in this chat" + X close btn)
+    64→    64→      ├─ [1] file list: class contains "flex-1" (Add from Drive / Add from computer …)
+    65→    65→      ├─ …possible intermediate children…
+    66→    66→      └─ [last] context box: class contains "mt-2"
+    67→    67→             ("Context usage for this conversation", e.g. "58/128.0K tokens")
+    68→    68→```
+    69→    69→
+    70→    70→Drawer opener/closer in the header: `button.drawer-toggle-button` (toggles
+    71→    71→`aside.right-drawer`).
+    72→    72→
+    73→    73→The implementation encodes exactly this as a **strict classifier** — if the shape changes,
+    74→    74→it refuses:
+    75→    75→
+    76→    76→```js
+    77→    77→function classifyKids(host) {
+    78→    78→    const kids = [...host.children];
+    79→    79→    const header = kids.length && kids[0].classList.contains('mb-4') ? kids[0] : null;
+    80→    80→    const ctx    = [...kids].reverse().find((k) => k.classList.contains('mt-2')) || null;
+    81→    81→    const list   = kids.find((k) => k !== header && k !== ctx && k.classList.contains('flex-1')) || null;
+    82→    82→    return { header, ctx, list };
+    83→    83→}
+    84→    84→// tryPlace() bails out if (!ctx || !header)
+    85→    85→```
+    86→    86→
+    87→    87→**Takeover strategy:** don't fight the vendor — *let it render*, then:
+    88→    88→
+    89→    89→- `header` and `list` kids → `style.display='none'` + `data-lbp-hidden="1"` attribute
+    90→    90→  (tracked in `STATE.hiddenKids` so we can re-hide after vendor re-renders);
+    91→    91→- our UI gets inserted with `host.insertBefore(ourUI, ctx)` — i.e. **before** the context box;
+    92→    92→- the context box is never hidden, and `tryPlace()` un-hides it as a safety net:
+    93→    93→
+    94→    94→```js
+    95→    95→if (ctx.style.display === 'none') {        // safety: context usage must always show
+    96→    96→    ctx.style.display = '';
+    97→    97→    ctx.removeAttribute('data-lbp-hidden');
+    98→    98→}
+    99→    99→```
+   100→   100→
+   101→   101→---
+   102→   102→
+   103→   103→## 4. Architecture at a glance
+   104→   104→
+   105→   105→```
+   106→   106→┌ header ─────────────────────────────┐
+   107→   107→│ [files button .drawer-toggle-button]│←── .lbp-fbadge badge dot (success=used, pulse=working)
+   108→   108→└─────────────────────────────────────┘
+   109→   109→aside.right-drawer
+   110→   110→└─ .files-panel-content
+   111→   111→   ├─ vendor header   (display:none, data-lbp-hidden)
+   112→   112→   ├─ vendor list     (display:none, data-lbp-hidden)
+   113→   113→   ├─ ┌ .lbp  (OUR UI — single DOM node, migrates between 3 homes) ┐
+   114→   114→   │  │ .lbp-tabs     tab strip (+ new-tab btn, per-tab X)        │
+   115→   115→   │  │ .lbp-toolbar  back · reload · URL input · max · close    │
+   116→   116→   │  │ .lbp-stage    live JPEG frame / start page / busy / err  │
+   117→   117→   │  │ .lbp-log      collapsible ACTIVITY log                   │
+   118→   118→   │  └────────────────────────────────────────────────────────────┘
+   119→   119→   └─ context box "Context usage…"  ← NEVER hidden, UI inserted before it
+   120→   120→
+   121→   121→Maximize: the SAME .lbp node is moved into
+   122→   122→  body > .lbp-modalwrap (fixed inset-0, z-index 4000, blurred backdrop)
+   123→   123→        > .lbp-modalbox (role=dialog, aria-modal) 
+   124→   124→… and moved back on restore. Escape closes the modal.
+   125→   125→
+   126→   126→Backend: browser-engine.cjs = Playwright Chromium, one BrowserContext,
+   127→   127→one Page per tab, JPEG frames tagged with a monotonic rev.
+   128→   128→```
+   129→   129→
+   130→   130→Three "homes" of the UI node: **panel** (`insertBefore` context box), **modal** (maximized),
+   131→   131→**parked** (detached but referenced in `STATE.ui` — when the drawer unmounts entirely;
+   132→   132→`scan()` re-places it on next open).
+   133→   133→
+   134→   134→---
+   135→   135→
+   136→   136→## 5. Backend: `browser-engine.cjs` spec
+   137→   137→
+   138→   138→Playwright Chromium, `headless: true`, one shared `BrowserContext`, **one `Page` per tab**,
+   139→   139→viewport `{ width: 1280, height: 800 }`, `deviceScaleFactor: 1`.
+   140→   140→
+   141→   141→Key constants: `IDLE_CLOSE_MS = 5 * 60 * 1000`, `NAV_TIMEOUT_MS = 20000`,
+   142→   142→`SETTLE_MS = 700` (wait after each mutating op so the page paints), `MAX_ACTIONS = 200`.
+   143→   143→
+   144→   144→Playwright resolution order (so a missing module just flips status to unavailable, no crash):
+   145→   145→`process.env.LUMO_PLAYWRIGHT_PATH` → `require.resolve('playwright')` →
+   146→   146→`/home/z/.npm-global/lib/node_modules/playwright` → `/usr/local/lib/node_modules/playwright`.
+   147→   147→
+   148→   148→**Core mechanics you must replicate:**
+   149→   149→
+   150→   150→- **Monotonic frame rev.** Every screenshot bumps `state.rev` and swaps
+   151→   151→  `state.frame = { rev, mime:'image/jpeg', b64, w:1280, h:800 }`. `captureFrame()` is
+   152→   152→  `page.screenshot({ type:'jpeg', quality:62, timeout:15000 })` + defensive `page.url()` /
+   153→   153→  `page.title()` reads (they throw mid-navigation — wrap in try/catch).
+   154→   154→- **Promise-chain mutex for all mutating ops** so panel + future agent tools can't interleave:
+   155→   155→
+   156→   156→  ```js
+   157→   157→  function enqueue(fn) {
+   158→   158→      state.lastUsedAt = nowMs();
+   159→   159→      const run = state.chain.then(() => fn());
+   160→   160→      state.chain = run.then(() => {}, () => {});
+   161→   161→      return run;
+   162→   162→  }
+   163→   163→  ```
+   164→   164→
+   165→   165→- **Snapshot is read-only and lock-free** (single-threaded atomic swap of `state.frame`;
+   166→   166→  a poll racing a navigate simply sees old or new frame).
+   167→   167→- **`normalizeUrl(input)`** — accepts bare domains and `localhost`
+   168→   168→  (`foo.com` → `https://foo.com`), validates http/https only, else `null`.
+   169→   169→- **URL-input handling** (`opNavigate`): invalid URL → `{ ok:false, error:'invalid URL' }`
+   170→   170→  (logged as failed action); goto `domcontentloaded` + `SETTLE_MS` + captureFrame;
+   171→   171→  on error still captureFrame (so the user sees the error page) and return `ok:false`.
+   172→   172→- **Tab close semantics** (`opCloseTab`): remember closed tab in `state.tabHistory`
+   173→   173→  (max 20, `unshift`) for restore chips; if the closed tab was active, activate
+   174→   174→  `tabOrder[0]`; if **no tabs remain** → `state.frame = null; state.rev += 1;` so the
+   175→   175→  panel falls back to its start page.
+   176→   176→- **Idle lifecycle:** a 60 s sweeper closes the whole browser after 5 min idle
+   177→   177→  (`lastUsedAt`), clears tabs, bumps `rev`, keeps `tabHistory`. Next API call relaunches
+   178→   178→  transparently via `ensureBrowser()`. The panel must tolerate `frame:null` + empty
+   179→   179→  `tabs` (that's its start-page state).
+   180→   180→- **Action ring buffer:** every op logs `{ t: ISO, tool, summary(≤180 chars), ms, ok }`,
+   181→   181→  capped at 200.
+   182→   182→
+   183→   183→Exported API surface (what the server routes call):
+   184→   184→
+   185→   185→| Export | Signature |
+   186→   186→|---|---|
+   187→   187→| `status()` | `{ available:true, engine:'playwright' }` or `{ available:false }` |
+   188→   188→| `snapshot({since})` | see payload below |
+   189→   189→| `navigate({url, tabId?})` | targets given tab or active tab; creates one if none |
+   190→   190→| `newTab({url?})` | creates tab, becomes active |
+   191→   191→| `closeTab({tabId})` | |
+   192→   192→| `activateTab({tabId})` | captures a fresh frame of the newly active tab |
+   193→   193→| `action({type,…})` | `click{x,y}` · `scroll{dx,dy}` · `key{key}` · `type{text,submit?}` · `back` · `reload` |
+   194→   194→| `close()` | tear down browser + all tabs |
+   195→   195→
+   196→   196→**Snapshot payload** (`snapshotSync`):
+   197→   197→
+   198→   198→```js
+   199→   199→{
+   200→   200→  rev,                       // latest frame revision
+   201→   201→  tabs: [{ id, title, url }],// insertion order
+   202→   202→  activeTabId,
+   203→   203→  url, title,                // of active tab ('' when none)
+   204→   204→  active,                    // active tab's url
+   205→   205→  frame,                     // { rev, mime, b64, w, h } — ONLY if frame.rev > since, else null
+   206→   206→  actions: [ …last 60… ],
+   207→   207→  tabHistory: [ …first 8 of… { url, title } ],
+   208→   208→  engine: 'playwright',
+   209→   209→}
+   210→   210→```
+   211→   211→
+   212→   212→The `since` filter is what makes 1.2 s polling cheap: no new frame ⇒ no base64 payload.
+   213→   213→
+   214→   214→---
+   215→   215→
+   216→   216→## 6. HTTP route wiring (`lumo-server.cjs`)
+   217→   217→
+   218→   218→All under prefix **`/api/lumo/v1`**. Response envelope (matches the whole Lumo API):
+   219→   219→
+   220→   220→```js
+   221→   221→const ok = (extra) => JSON.stringify({ Code: 1000, ...extra });   // envelope: top-level fields
+   222→   222→```
+   223→   223→
+   224→   224→| Method & path | Body / query | Wraps |
+   225→   225→|---|---|---|
+   226→   226→| `GET  /browser/status` | — | `ok({ Status: engine.status() })` |
+   227→   227→| `GET  /browser/snapshot?since=N` | — | `ok({ Snapshot: engine.snapshot({since}) })` |
+   228→   228→| `POST /browser/navigate` | `{url, tabId?}` | result; HTTP 400 + `{ok:false,error}` on failure |
+   229→   229→| `POST /browser/new_tab` | `{url?}` | result |
+   230→   230→| `POST /browser/close_tab` | `{tabId}` | result |
+   231→   231→| `POST /browser/activate_tab` | `{tabId}` | result |
+   232→   232→| `POST /browser/action` | `{type, x?, y?, dx?, dy?, key?, text?, submit?}` | result |
+   233→   233→| `POST /browser/close` | — | result |
+   234→   234→
+   235→   235→The frontend's fetch wrapper mirrors this envelope:
+   236→   236→
+   237→   237→```js
+   238→   238→async function api(path, opts = {}) {
+   239→   239→    // body present ⇒ POST + JSON; !r.ok ⇒ throw j.Error / j.error.message / 'HTTP '+status
+   240→   240→    const j = await r.json();
+   241→   241→    if (j && typeof j.Code === 'number' && j.Code !== 1000) throw new Error(j.Error || 'Code ' + j.Code);
+   242→   242→    return j;
+   243→   243→}
+   244→   244→// callers read j.Status.available, j.Snapshot, etc.
+   245→   245→```
+   246→   246→
+   247→   247→---
+   248→   248→
+   249→   249→## 7. Frontend: `lumo-browser-panel.js` spec
+   250→   250→
+   251→   251→One IIFE, guarded against double-boot with `if (window.__LBP3) return; window.__LBP3 = true;`
+   252→   252→(loaded with `defer`, so DOMContentLoaded timing is handled in boot).
+   253→   253→
+   254→   254→### 7.1 Boot & gating
+   255→   255→
+   256→   256→```js
+   257→   257→async function tryMount() {
+   258→   258→    if (STATE.available) return;
+   259→   259→    try {
+   260→   260→        const j = await api('/status');
+   261→   261→        if (j?.Status?.available) {
+   262→   262→            STATE.available = true;
+   263→   263→            injectStyle(); startWatcher(); startPolling();
+   264→   264→            document.addEventListener('keydown', onGlobalKey);  // Escape → un-maximize
+   265→   265→        }
+   266→   266→    } catch { /* not signed in / server busy */ }
+   267→   267→    if (!STATE.available) setTimeout(tryMount, 8000);
+   268→   268→}
+   269→   269→```
+   270→   270→
+   271→   271→Nothing touches the page until `/status` says available. **This is what makes the script
+   272→   272→safe on login pages, error pages, and when the engine deps are missing.**
+   273→   273→
+   274→   274→### 7.2 Stylesheet
+   275→   275→
+   276→   276→One `<style id="lbp-style">` injected into `<head>`, contents = a template literal built
+   277→   277→**exclusively from Proton tokens** (rule §2.3). Class inventory:
+   278→   278→
+   279→   279→| Class | Purpose |
+   280→   280→|---|---|
+   281→   281→| `.lbp` | root: flex column, `border:1px solid var(--border-weak)`, `background:var(--background-norm)`, radius md |
+   282→   282→| `.lbp-modalwrap` / `.lbp-modalbox` | maximize overlay: `position:fixed; inset:0; z-index:4000`, `color-mix` translucent `--background-weak` + `backdrop-filter:blur(4.5px)`; box = inset `clamp(12px,3.5vw,40px)`, radius lg, `--shadow-lifted`, `role=dialog` |
+   283→   283→| `.lbp-tabs`, `.lbp-tab(.on)`, `.lbp-tabtitle`, `.lbp-tabx`, `.lbp-newtab` | tab strip; active tab gets `box-shadow:inset 0 -2px 0 var(--primary-minor-2)` |
+   284→   284→| `.lbp-dot(.busy/.err)` | status dot per tab: `--signal-success` active, `--primary-minor-2` pulsing busy, `--signal-danger` non-http URL |
+   285→   285→| `.lbp-toolbar`, `.lbp-ibtn` | toolbar row; 28×28 icon buttons w/ hover `--background-weak`, `:active` scale(.94), `:focus-visible` outline `--primary-minor-2` |
+   286→   286→| `.lbp-urlbox`, `.lbp-urlico`, `.lbp-url` | address input; pill on `--background-weak`, focus ring `--primary-minor-2` |
+   287→   287→| `.lbp-stage`, `.lbp-frame` | screenshot stage; `img` absolute inset-0, `object-fit:fill`, `cursor:pointer`, focusable |
+   288→   288→| `.lbp-start*`, `.lbp-hist`, `.lbp-histchip` | empty state: globe icon tile, blurb, "example.com" input, restore-history chips |
+   289→   289→| `.lbp-busy`, `.lbp-spin`, `.lbp-flash(.show)` | "Working…" pill (top-right), spinner, red error strip (`--signal-danger`) above stage bottom |
+   290→   290→| `.lbp-log*`, `.lbp-chip`, `.lbp-logrow(.bad)` | collapsible ACTIVITY log; failed rows tinted `--signal-danger` |
+   291→   291→| `.lbp-fbadge(.pulse)` | 8px dot absolutely positioned on `button.drawer-toggle-button` (script sets `position:relative` on it) |
+   292→   292→
+   293→   293→Icons: inline SVG via a tiny `svgIcon(paths, size)` helper (`stroke:currentColor`, so they
+   294→   294→inherit token colors) with a path map `IC = { x, plus, back, reload, maximize, minimize, globe, external }`.
+   295→   295→
+   296→   296→### 7.3 UI tree (`buildUI()`)
+   297→   297→
+   298→   298→```
+   299→   299→div.lbp [data-lbp=root, role=region, aria-label="Agent browser"]
+   300→   300→├─ div.lbp-tabs [data-lbp=tabs]
+   301→   301→│   └─ button.lbp-newtab ("+" → actNewTab())     ← tab chips re-rendered before this
+   302→   302→├─ div.lbp-toolbar
+   303→   303→│   ├─ btn back → actAction('back')   ├─ btn reload → actAction('reload')
+   304→   304→│   ├─ div.lbp-urlbox > globe-icon + input.lbp-url (Enter → actGo(value))
+   305→   305→│   ├─ btn maximize [data-lbp=maximize] → toggleMaximize()
+   306→   306→│   └─ btn close → closeDrawer()
+   307→   307→├─ div.lbp-stage
+   308→   308→│   ├─ img.lbp-frame (alt="Live browser view", tabIndex=0)
+   309→   309→│   ├─ div.lbp-start [data-lbp=start]  (globe tile, h3 "Agent Browser",
+   310→   310→│   │      p, .lbp-starturl input → actNewTab(v), div.lbp-hist [data-lbp=hist])
+   311→   311→│   ├─ div.lbp-busy (spinner + "Working…")     └─ div.lbp-flash [data-lbp=flash]
+   312→   312→└─ div.lbp-log [data-lbp=log]
+   313→   313→    ├─ div.lbp-loghead ("ACTIVITY" + count [data-lbp=logcount] + chevron; click toggles .open)
+   314→   314→    └─ div.lbp-logbody [data-lbp=logbody]
+   315→   315→```
+   316→   316→
+   317→   317→Everything interactive has `title` + `aria-label`; the img and inputs are keyboard-reachable.
+   318→   318→Every mutating click goes through `guarded(fn)` which increments `STATE.opsPending`
+   319→   319→(shows busy pill + pulses badge), flashes errors via `showFlash()`, and always decrements.
+   320→   320→
+   321→   321→### 7.4 User interactions → engine calls
+   322→   322→
+   323→   323→```js
+   324→   324→actGo(v)        // URL bar Enter: tabs exist ? POST /navigate {url:v, tabId:activeTabId}
+   325→   325→                //                              : POST /new_tab {url:v}   (first tab = new tab)
+   326→   326→actNewTab(url)  // POST /new_tab {url:url||''}
+   327→   327→actAction(type) // POST /action {type}                       (back / reload)
+   328→   328→```
+   329→   329→
+   330→   330→**Live view input mapping** (the part that makes it a real browser, not a preview):
+   331→   331→
+   332→   332→```js
+   333→   333→// click: map from displayed <img> rect to engine viewport (1280×800), then:
+   334→   334→actAction('click', { x, y });   // clamped server-side
+   335→   335→// wheel: e.preventDefault(); throttle to ≥140 ms between sends:
+   336→   336→actAction('scroll', { dx: Math.round(e.deltaX), dy: Math.round(e.deltaY) });
+   337→   337→// keyboard on focused img: never hijack ctrl/meta/alt combos;
+   338→   338→//   printable key  → actAction('type', { text: e.key });
+   339→   339→//   special keys   → actAction('key', { key: e.key })  // Enter, Backspace, Tab, Arrows, Escape, Home, End
+   340→   340→```
+   341→   341→
+   342→   342→### 7.5 Maximize modal
+   343→   343→
+   344→   344→```js
+   345→   345→function maximize() {
+   346→   346→    const wrap = el('div', 'lbp-modalwrap');  wrap.setAttribute('data-lbp', 'modal');
+   347→   347→    const box  = el('div', 'lbp-modalbox');   box.setAttribute('role','dialog');
+   348→   348→    box.setAttribute('aria-modal','true');    box.setAttribute('aria-label','Agent browser — maximized');
+   349→   349→    box.appendChild(STATE.ui);                // MOVE the same node out of the panel
+   350→   350→    wrap.appendChild(box); document.body.appendChild(wrap);
+   351→   351→    STATE.maximized = true;
+   352→   352→    // swap maximize icon → minimize; wrap.mousedown on backdrop (target===wrap) restores
+   353→   353→}
+   354→   354→function restoreFromModal() {
+   355→   355→    STATE.maximized = false;  document.querySelector('[data-lbp="modal"]')?.remove();
+   356→   356→    if (!tryPlace()) parkUI();   // drawer may be gone → park until next open
+   357→   357→}
+   358→   358→```
+   359→   359→
+   360→   360→- `reassert()` early-returns while maximized (the UI legitimately lives outside the panel).
+   361→   361→- Global `keydown` listener: `Escape` while maximized → restore.
+   362→   362→- Polling cadence treats maximized like "drawer open" (fast poll).
+   363→   363→
+   364→   364→### 7.6 Closing the panel
+   365→   365→
+   366→   366→`closeDrawer()` restores from modal first, then synthetic-clicks the **vendor's own close
+   367→   367→button** so the drawer animates the vendor way:
+   368→   368→
+   369→   369→```js
+   370→   370→const headerKid = STATE.hiddenKids[0];                       // the hidden vendor header
+   371→   371→const xbtn = headerKid
+   372→   372→    ? [...headerKid.querySelectorAll('button')].filter(b => b.querySelector('svg')).pop()
+   373→   373→    : null;                                                  // last icon-button in it = the X
+   374→   374→const target = xbtn || fallbackLastIconButtons || document.querySelector('button.drawer-toggle-button');
+   375→   375→if (target) { target.click(); STATE.drawerClosedAt = Date.now(); return; }
+   376→   376→showFlash('Close the panel with the header button.');
+   377→   377→```
+   378→   378→
+   379→   379→(`STATE.drawerClosedAt` exists to gate auto-open behavior/cooldowns; our filter excludes any
+   380→   380→button inside `[data-lbp-hidden]`/`.lbp` so we never click our own UI.)
+   381→   381→
+   382→   382→### 7.7 Takeover mechanics (the heart)
+   383→   383→
+   384→   384→```js
+   385→   385→function findHost() {   // prefer a laid-out host (drawer actually open) that doesn't already hold our UI
+   386→   386→    const hosts = [...document.querySelectorAll('.files-panel-content')];
+   387→   387→    const visible = hosts.filter(h => h.getClientRects().length > 0 && !h.contains(STATE.ui));
+   388→   388→    return visible[0] || hosts.find(h => !h.contains(STATE.ui)) || null;
+   389→   389→}
+   390→   390→
+   391→   391→function tryPlace() {
+   392→   392→    if (STATE.ui && STATE.ui.isConnected && STATE.host?.contains(STATE.ui)) return true; // already placed
+   393→   393→    const host = findHost();          if (!host) return false;
+   394→   394→    const { header, ctx, list } = classifyKids(host);
+   395→   395→    if (!ctx || !header) return false;                     // shape changed → REFUSE (rule §2.6)
+   396→   396→    for (const k of [header, list]) {                      // hide vendor pieces (idempotent)
+   397→   397→        if (k && k.style.display !== 'none') {
+   398→   398→            k.style.display = 'none'; k.setAttribute('data-lbp-hidden','1');
+   399→   399→            if (!STATE.hiddenKids.includes(k)) STATE.hiddenKids.push(k);
+   400→   400→        }
+   401→   401→    }
+   402→   402→    if (ctx.style.display === 'none') { ctx.style.display=''; ctx.removeAttribute('data-lbp-hidden'); }
+   403→   403→    if (!STATE.ui) STATE.ui = buildUI();
+   404→   404→    host.insertBefore(STATE.ui, ctx);                      // BEFORE the context box. Always.
+   405→   405→    STATE.host = host;  return true;
+   406→   406→}
+   407→   407→
+   408→   408→function reassert() {                                      // runs on EVERY body mutation
+   409→   409→    if (STATE.maximized) return;
+   410→   410→    if (!tryPlace()) { if (STATE.ui && !STATE.ui.isConnected) parkUI(); return; }
+   411→   411→    const { ctx } = classifyKids(STATE.host);
+   412→   412→    if (ctx && ctx.style.display === 'none') ctx.style.display = '';   // ctx must never stay hidden
+   413→   413→    for (const k of STATE.hiddenKids) {                    // vendor re-render may have re-shown kids
+   414→   414→        if (!k.isConnected) { STATE.hiddenKids = STATE.hiddenKids.filter(x => x !== k); continue; }
+   415→   415→        if (k.style.display !== 'none' && k.hasAttribute('data-lbp-hidden')) k.style.display = 'none';
+   416→   416→    }
+   417→   417→}
+   418→   418→
+   419→   419→function startWatcher() {
+   420→   420→    STATE.mo = new MutationObserver(() => scan());
+   421→   421→    STATE.mo.observe(document.body, { childList: true, subtree: true });
+   422→   422→}
+   423→   423→function scan() { reassert(); if (!STATE.ui?.isConnected) tryPlace(); updateBadge(); }
+   424→   424→```
+   425→   425→
+   426→   426→**Badge** (`updateBadge()`): ensure a `span.lbp-fbadge` exists on `button.drawer-toggle-button`
+   427→   427→(set its `position:relative` once); visible iff `STATE.frameRev > 0 || opsPending > 0`;
+   428→   428→`.pulse` class while ops are pending (agent is driving).
+   429→   429→
+   430→   430→### 7.8 Rendering from snapshot
+   431→   431→
+   432→   432→```js
+   433→   433→function renderSnapshot(snap) {
+   434→   434→    STATE.tabs = snap.tabs || [];  STATE.activeTabId = snap.activeTabId;  STATE.actions = snap.actions || [];
+   435→   435→    renderTabs();
+   436→   436→    // URL bar refresh rule — NEVER clobber an in-progress edit:
+   437→   437→    //   refresh only when input not focused OR active tab changed since last render
+   438→   438→    //   (tracked via STATE.lastActiveFor).
+   439→   439→    // stage: tabs.length ? show img / hide start : hide img / show start (+ history chips)
+   440→   440→    if (hasTab && snap.frame && snap.frame.rev > STATE.frameRev) {   // rev-dedup: only new frames
+   441→   441→        STATE.frameRev = snap.frame.rev;
+   442→   442→        img.src = 'data:' + snap.frame.mime + ';base64,' + snap.frame.b64;
+   443→   443→        updateBadge();
+   444→   444→    }
+   445→   445→    // no tabs → render ≤4 restore chips from snap.tabHistory (label = URL host, click = actNewTab(url))
+   446→   446→    renderLog();
+   447→   447→}
+   448→   448→```
+   449→   449→
+   450→   450→`renderTabs()` rebuilds the `.lbp-tab` chips: active gets `.on`; dot gets `.err` when the
+   451→   451→tab URL isn't http(s); tab click → `POST /activate_tab`; per-tab ✕ →
+   452→   452→`POST /close_tab` with `e.stopPropagation()`. `renderLog()` draws the last 40 actions
+   453→   453→reversed (time `HH:MM:SS` from ISO, uppercase chip label via
+   454→   454→`ACT_LABELS = { navigate:'nav', new_tab:'new', close_tab:'close', activate_tab:'focus',
+   455→   455→click:'click', scroll:'scroll', type:'type', key:'key', back:'back', reload:'reload',
+   456→   456→idle_close:'idle' }`, summary, `ms`), `.bad` class for failed ops.
+   457→   457→
+   458→   458→### 7.9 Polling
+   459→   459→
+   460→   460→```js
+   461→   461→function drawerVisible() {            // width check survives vendor open/close animations
+   462→   462→    const d = document.querySelector('aside.right-drawer');
+   463→   463→    return !!d && d.getBoundingClientRect().width > 8;
+   464→   464→}
+   465→   465→// pollTick: GET /snapshot?since=STATE.frameRev → renderSnapshot(snap.Snapshot)
+   466→   466→//           busyFetch re-entrancy guard; errors stored, never thrown
+   467→   467→function schedule() {
+   468→   468→    const wantFast = drawerVisible() || STATE.maximized || STATE.opsPending > 0;
+   469→   469→    setTimeout(pollTick, wantFast ? 1200 : 4000);   // fast when visible/busy, cheap otherwise
+   470→   470→}
+   471→   471→function pollNow()  { setTimeout(pollTick, 60); }   // kick right after any user action
+   472→   472→```
+   473→   473→
+   474→   474→### 7.10 STATE field inventory (for a faithful reimplementation)
+   475→   475→
+   476→   476→`available, styled, ui, host, hiddenKids[], mo, pollTimer, polling, frameRev, tabs[],
+   477→   477→activeTabId, actions[], maximized, opsPending, busyFetch, badge, drawerClosedAt,
+   478→   478→lastResult, wheelAt, lastActiveFor` — plus the API base `const API='/api/lumo/v1/browser'`.
+   479→   479→
+   480→   480→---
+   481→   481→
+   482→   482→## 8. Shipping: cache busting & patch-chain
+   483→   483→
+   484→   484→`index.html` carries the script tag **without** `integrity` (that's deliberate — vendor
+   485→   485→chunks have SRI, ours doesn't, so the browser re-fetches on version change):
+   486→   486→
+   487→   487→```html
+   488→   488→<script src="/assets/static/lumo-browser-panel.js?v=5" defer></script>
+   489→   489→```
+   490→   490→
+   491→   491→Release procedure for any frontend change:
+   492→   492→
+   493→   493→1. Edit `lumo-browser-panel.js` only.
+   494→   494→2. Bump `?v=` (e.g. `v=5` → `v=6`). One-liner: `sed -i 's|lumo-browser-panel.js?v=[0-9]*|lumo-browser-panel.js?v=6|' LumoOS/lumo-dist/index.html`
+   495→   495→3. `node --check LumoOS/lumo-dist/assets/static/lumo-browser-panel.js`
+   496→   496→4. Run the integrity gate: `node LumoOS/diag-all-runtime-integrity.cjs` → must report
+   497→   497→   **0 mismatch / 0 missing** (proves no vendor chunk drifted).
+   498→   498→5. `cd LumoOS && node --test tests/*.test.mjs`
+   499→   499→
+   500→   500→---
+   501→   501→
+   502→   502→## 9. Verification checklist (E2E, manual or via a headless browser agent)
+   503→   503→
+   504→   504→- [ ] Reload Lumo with the new `?v=`; DevTools console shows `[lbp3] engine available — takeover armed` (and shows **nothing** if engine deps missing).
+   505→   505→- [ ] Click header files button → drawer opens showing the browser UI, **not** Drive content.
+   506→   506→- [ ] **"Context usage for this conversation" is still visible at the panel bottom** at all times (before/after takeover, after vendor re-renders, after maximize/restore, after close/reopen).
+   507→   507→- [ ] Type an address in the start page or URL bar → frame appears; rev-dedup means no flicker on no-op polls.
+   508→   508→- [ ] Click a link inside the frame, scroll with the wheel, focus frame + type → engine log shows click/scroll/type actions and the view updates.
+   509→   509→- [ ] "+" opens a second tab; per-tab ✕ closes; closing last tab returns to the start page with restore chips.
+   510→   510→- [ ] Maximize → full-screen modal (dialog role, blurred backdrop), Escape / backdrop click / minimize button restores into the panel; drawer reopen after full unmount re-attaches UI.
+   511→   511→- [ ] Panel ✕ closes the drawer (vendor animation), badge on the header button persists while a session exists.
+   512→   512→- [ ] Dark mode + light mode both render with token colors only (grep your CSS for `#[0-9a-f]{3,6}` → only fallbacks allowed).
+   513→   513→- [ ] Engine idle ≥5 min → next interaction transparently relaunches (start page shows, then works again).
+   514→   514→
+   515→   515→---
+   516→   516→
+   517→   517→## 10. Pitfalls we hit (learn from these)
+   518→   518→
+   519→   519→1. **Vendor re-renders restore `display`** on the kids you hid — hence `reassert()` re-hiding
+   520→   520→   tracked kids on every mutation, and the ctx-box un-hide safety net.
+   521→   521→2. **Don't guess the DOM.** The strict `classifyKids` contract check exists because a
+   522→   522→   vendor class rename would otherwise cause us to hide the wrong node (including the
+   523→   523→   context-usage block). Refuse > corrupt.
+   524→   524→3. **URL bar focus race:** the poll loop re-renders ~1×/s; without the
+   525→   525→   "not focused OR tab changed" rule you'd fight the user's typing.
+   526→   526→4. **`page.url()`/`page.title()` throw mid-navigation** — always try/catch them.
+   527→   527→5. **Frame dedup by rev**, not by URL: SPA navigations change the pixels without changing
+   528→   528→   the URL; `since=` + monotonic rev handles both and keeps polling cheap.
+   529→   529→6. **Coordinate mapping must use the img's live `getBoundingClientRect()`** (panel and
+   530→   530→   modal have different sizes; the engine viewport is always 1280×800).
+   531→   531→7. **Idle teardown is a feature:** after it, `tabs=[]` and `frame=null` with a bumped rev —
+   532→   532→   the panel must show its start page gracefully, and the next call relaunches.
+   533→   533→8. **Never `focus()` without `preventScroll`** — it yanks the drawer scroll position.
+   534→   534→9. **Wheel handler must `{ passive:false }`** or `preventDefault()` is ignored and the
+   535→   535→   host page scrolls instead of the guest page.
+   536→   536→10. **The `?v=` bump is mandatory** on every JS edit — defer + no-integrity otherwise
+   537→   537→    serves a stale cached copy and you'll debug ghosts.
+   538→   538→
+   539→   539→---
+   540→   540→
+   541→   541→## 11. Current state
+   542→   542→
+   543→   543→- Frontend: `lumo-browser-panel.js` **v3** (guard `window.__LBP3`, log tag `[lbp3]`),
+   544→   544→  shipped at `index.html` `?v=5`.
+   545→   545→- Backend: `browser-engine.cjs` v3 (Playwright multi-tab), routes in `lumo-server.cjs`.
+   546→   546→- Committed: `6403a55`. Integrity gate last run: 2585 files checked / 0 mismatch / 0 missing.
+   547→   547→

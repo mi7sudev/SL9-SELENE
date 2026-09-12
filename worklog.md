@@ -41,3 +41,26 @@ Work Log:
 Stage Summary:
 - PREVIEW NOW SHOWS THE REAL LUMO PRODUCT (guest page -> sign in -> encrypted chat via GLM through the bridge).
 - Still missing vs last night (documented for re-implementation in LumoOSv12/worklog.md + SL9-SELENE/worklog.md): rest/service-registry auto-connect, google/gmail connectors, orchestration v1/v2, persistence v2, guest-chat parity, feature flags, limits, web_search dispatch, agent tool-creation.
+
+---
+Task ID: browser-panel-v3
+Agent: main (Z.ai Code)
+Task: Reimplement the Agent Browser side-panel (per uploaded AGENT-BROWSER-PANEL.md spec) fully functional — navigable, expandable/maximizable to a floating modal, usable on desktop AND mobile.
+
+Work Log:
+- Found the feature lost with the old sandbox (spec commit 6403a55 not in SL9-SELENE history; no lumo-browser-panel.js, no browser-engine.cjs, no routes). Playwright + chromium-1234 binaries available at /home/z/.npm-global/lib/node_modules/playwright.
+- Verified vendor contract on THIS build: .files-panel-content lives in chunk 4124.6ffe79b5.chunk.js (same chunk # as audited build); drawer opener = button.drawer-toggle-button (only rendered inside a conversation view, hidden on the new-chat screen).
+- Built LumoOS/browser-engine.cjs per spec §5: Playwright Chromium headless, one BrowserContext, one Page per tab, viewport 1280x800, monotonic JPEG frame revs (quality 62), promise-chain mutex (enqueue), normalizeUrl (localhost/127.0.0.1 → http://, bare domains → https://), 5-min idle sweeper, tab-history restore (max 20), action ring buffer (200), tolerant playwright resolution order.
+- Wired /api/lumo/v1/browser/* routes into lumo-server.cjs (dispatch at top of handleLumoData → standard auth gate; envelope ok({Status|Snapshot|Result}), HTTP 400 {ok:false,error} on engine failure; engine require is failure-tolerant).
+- Built lumo-browser-panel.js (852 lines, IIFE, window.__LBP3 guard): strict classifyKids takeover (mb-4 header + flex-1 list hidden with data-lbp-hidden; mt-2 context box NEVER hidden; .lbp inserted before ctx), tab strip w/ status dots + per-tab ✕, URL bar with focus-race rule, live view input mapping (click coords, wheel throttle 140ms passive:false, keyboard special-keys), activity log (ACT_LABELS, last 40), badge on header files button, maximize-to-modal (role=dialog, blurred backdrop, Escape/backdrop/minimize restore, parked-node re-attach), rev-dedup polling 1.2s/4s, zero footprint until /status available (8s retry).
+- Mobile additions: @media ≤640px 40px touch targets + 16px inputs (no iOS zoom); object-fit:contain with letterbox-aware coordinate mapping; single-finger drag = guest scroll (touch-action:none, drag-vs-tap discrimination); hidden 16px keyboard-relay input relaying soft-keyboard beforeinput (insertText/Backspace/Enter) to the guest page.
+- index.html: added <script src="/assets/static/lumo-browser-panel.js?v=5" defer> (no integrity, after dictation bridge). Vendor integrity verified via git (only index.html + lumo-server.cjs modified, 0 vendor chunks touched; diag-all-runtime-integrity.cjs has a hardcoded D:/ path from the original author — unusable here).
+- Restarted lumo-server with LUMO_PORT=3000 (default is 8090 — restart cmd: cd /home/z/SL9-SELENE && LUMO_PORT=3000 setsid -f node LumoOS/lumo-server.cjs > lumo-server.log 2>&1).
+- E2E via agent-browser ALL PASS: [lbp3] armed on /u/0; drawer takeover w/ context box visible; example.com nav via start page; click inside frame navigated to iana.org; scroll logged; failed-nav flash (HTTP 400 localhost:8080); localhost:3000 → http normalization → /guest; maximize modal (dialog, backdrop) + click nav inside modal + Escape restore + backdrop restore; 2 tabs, per-tab ✕ fallback, last-tab close → start page + 2 history chips; close drawer via vendor ✕; reopen re-attaches; page reload preserves live engine session (iana tab restored); MOBILE 390x844: drawer panel, maximize 374x828, tap-click nav to iana.org (precise mapping), keyboard relay TYPE H/i, backdrop restore; zero page errors.
+- Committed ef04dcd (4 files, +1341) locally. node --check on all 3 JS files OK. tests/*.test.mjs: 3 pre-existing mcp-proxy failures (verified identical with my changes stashed — unrelated to this work); store/mcp-manager/mcp-connections pass.
+
+Stage Summary:
+- Agent Browser v3 is LIVE in the Lumo product on :3000: header files button → side-panel browser (multi-tab, URL bar, live clickable/scrollable/typeable view, activity log) + Maximize button → floating full-screen modal with blurred backdrop (Escape/backdrop/minimize to restore) — fully usable on desktop and mobile (touch scroll, tap navigation, soft-keyboard relay).
+- Engine session survives client reloads; idle teardown after 5 min transparently relaunches.
+- Key artifacts: LumoOS/browser-engine.cjs, LumoOS/lumo-dist/assets/static/lumo-browser-panel.js (?v=5), lumo-server.cjs routes, verify-1..10 screenshots in /home/z/SL9-SELENE/.
+- Note: mcp-proxy.test.mjs has 3 pre-existing failures unrelated to the browser (fails on clean tree too).
