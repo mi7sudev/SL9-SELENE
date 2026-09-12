@@ -1,0 +1,9 @@
+# Byte-exact working tree everywhere.
+#
+# This repo vendors a pre-built SPA (LumoOS/lumo-dist/) whose scripts carry
+# Subresource Integrity hashes: a single converted line ending breaks the hash
+# and the app white-screens. Line-ending auto-conversion (core.autocrlf on
+# Windows) must therefore never touch any tracked file. "-text" disables all
+# EOL conversion in both directions; files are stored and checked out exactly
+# as committed.
+* -text
