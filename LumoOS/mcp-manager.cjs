@@ -90,7 +90,7 @@ async function assertUrlAllowed(rawUrl, trustedLocal) {
 }
 
 function normalizeEntry(entry) {
-    const t = entry.transport === 'http' ? 'http' : 'stdio';
+    const t = entry.transport === 'http' ? 'http' : entry.transport === 'rest' ? 'rest' : 'stdio';
     const out = {
         id: String(entry.id || ''),
         name: String(entry.name || 'MCP server').slice(0, 80),
@@ -128,6 +128,19 @@ function normalizeEntry(entry) {
     } else {
         out.url = String(entry.url || '').trim();
         out.headers = entry.headers && typeof entry.headers === 'object' ? { ...entry.headers } : {};
+    }
+    if (t === 'rest') {
+        // REST (direct API) connections: no MCP handshake — the runtime exposes
+        // ONE governed tool (api_request) whose reach is bounded by these fields.
+        const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+        const allowed = (Array.isArray(entry.allowedMethods) ? entry.allowedMethods : [])
+            .map((m) => String(m).toUpperCase()).filter((m) => METHODS.includes(m));
+        out.allowedMethods = Array.from(new Set(allowed.length ? allowed : ['GET']));
+        out.healthPath = typeof entry.healthPath === 'string' && entry.healthPath.trim() ? entry.healthPath.trim() : '/';
+        out.description = typeof entry.description === 'string' ? entry.description.slice(0, 500) : '';
+        // REST default: bare key in the configured header (unlike MCP http,
+        // whose default is "Authorization: Bearer …")
+        if (entry.authHeaderPrefix === undefined && out.auth === 'api_key') out.authHeaderPrefix = '';
     }
     return out;
 }
@@ -280,6 +293,15 @@ function createMcpManager({ log } = {}) {
         const key = keyFor(entry.id, connection && connection.id);
         const st = stateFor(key);
         if (st.status === 'connected') return st;
+        if (entry.transport === 'rest') {
+            // REST connections are stateless direct HTTP: no MCP handshake and
+            // nothing to discover (the synthetic api_request tool is the whole
+            // surface; validation happens via restHealthCheck in
+            // mcp-connections.cjs). Mark connected so status views stay honest.
+            st.status = 'connected';
+            st.connectedAt = st.connectedAt || Date.now();
+            return st;
+        }
         // Backoff for the chat path: an unreachable server must not tax every
         // chat request with a full connect timeout. Admin actions use force.
         if (!force && st.status === 'error' && st.lastAttempt && Date.now() - st.lastAttempt < 60000) {
@@ -387,8 +409,126 @@ function createMcpManager({ log } = {}) {
         return text.slice(0, MAX_TOOL_RESULT_CHARS);
     }
 
-    function toolResultToText(result) {
-        if (!result) return '';
+    // ── REST (direct API) execution ────────────────────────────────────────────
+    // Direct API connections don't speak MCP: the runtime exposes ONE governed
+    // tool (api_request) per connection and executes it here, injecting the
+    // connection's decrypted credential into the configured auth header. The
+    // credential never appears in args, results, logs, or errors.
+    const REST_TIMEOUT_MS = 15000;
+    const MAX_REST_RESULT_CHARS = 32000;
+
+    function restUrlFor(entry, args) {
+        const base = String(entry.url || '').replace(/\/+$/, '');
+        let p = String(args && args.path ? args.path : '').trim();
+        if (!p) throw new Error('path is required (e.g. "/api/v1/workspaces/")');
+        if (!p.startsWith('/')) p = `/${p}`;
+        let u;
+        try { u = new URL(base + p); } catch { throw new Error(`invalid path for ${entry.name}: ${p.slice(0, 100)}`); }
+        const q = args && args.query && typeof args.query === 'object' && !Array.isArray(args.query) ? args.query : null;
+        if (q) {
+            for (const [k, v] of Object.entries(q)) {
+                if (v === undefined || v === null) continue;
+                u.searchParams.set(String(k), Array.isArray(v) ? v.map(String).join(',') : String(v));
+            }
+        }
+        return u;
+    }
+
+    async function callRestTool(entryRaw, args, { connection } = {}) {
+        const entry = normalizeEntry(entryRaw);
+        if (entry.transport !== 'rest') throw new Error('not a REST connection');
+        if (!args || typeof args !== 'object') throw new Error('invalid arguments');
+        const method = String(args.method || 'GET').toUpperCase();
+        if (!entry.allowedMethods.includes(method)) {
+            const err = new Error(`Method ${method} is not allowed for "${entry.name}" (allowed: ${entry.allowedMethods.join(', ')}). The administrator can widen the allowlist.`);
+            err.statusCode = 405;
+            throw err;
+        }
+        const u = restUrlFor(entry, args);
+        await assertUrlAllowed(u.toString(), entry.trustedLocal);
+        const headers = {};
+        const extra = args.extraHeaders && typeof args.extraHeaders === 'object' && !Array.isArray(args.extraHeaders) ? args.extraHeaders : {};
+        for (const [k, v] of Object.entries(extra)) {
+            const name = String(k).trim();
+            const lower = name.toLowerCase();
+            if (!name || lower === 'host' || lower === 'content-length') continue;
+            // the credential header is injected server-side only — never take
+            // it from model-supplied arguments
+            if (entry.auth !== 'none' && lower === String(entry.authHeaderName || '').toLowerCase()) continue;
+            headers[name] = String(v);
+        }
+        if (entry.auth !== 'none' && connection && connection.credential) {
+            const prefix = entry.authHeaderPrefix;
+            headers[entry.authHeaderName || 'X-API-Key'] = prefix ? `${prefix} ${connection.credential}` : connection.credential;
+        }
+        let body;
+        if (method !== 'GET' && method !== 'DELETE' && args.body !== undefined && args.body !== null) {
+            body = typeof args.body === 'string' ? args.body : JSON.stringify(args.body);
+            if (!headers['content-type']) headers['content-type'] = 'application/json';
+        }
+        let resp;
+        try {
+            resp = await withTimeout(
+                fetch(u, { method, headers, ...(body ? { body } : {}), signal: AbortSignal.timeout(REST_TIMEOUT_MS) }),
+                REST_TIMEOUT_MS + 2000,
+                'REST request',
+            );
+        } catch (e) {
+            const err = new Error(`REST request failed: ${redact(String((e && e.message) || e))}`);
+            err.statusCode = 502;
+            err.retryable = true;
+            throw err;
+        }
+        const text = await resp.text().catch(() => '');
+        const slim = {};
+        for (const h of ['content-type', 'x-ratelimit-limit', 'x-ratelimit-remaining', 'retry-after', 'link']) {
+            const v = resp.headers.get(h);
+            if (v) slim[h] = v;
+        }
+        let bodyOut = text;
+        try { bodyOut = JSON.stringify(JSON.parse(text)); } catch { /* not JSON — pass raw text */ }
+        const meta = { status: resp.status, ok: resp.ok, headers: slim, bodyBytes: text.length };
+        const payload = redact(`HTTP ${resp.status} ${resp.statusText || ''}\n${JSON.stringify(meta)}\n\n${bodyOut}`);
+        if (resp.status >= 500) {
+            // transient upstream failure: surface as a retryable tool error so
+            // the agent classifies it instead of trusting a garbage body
+            const err = new Error(`REST endpoint returned ${resp.status}: ${redact(text.slice(0, 300))}`);
+            err.isToolError = true;
+            err.rawText = payload.slice(0, MAX_REST_RESULT_CHARS);
+            err.retryable = true;
+            throw err;
+        }
+        say(`[MCP] REST call: ${entry.id} ${method} ${u.pathname} -> ${resp.status} (${text.length} bytes)`);
+        return payload.slice(0, MAX_REST_RESULT_CHARS);
+    }
+
+    // Health check for rest connections: a real authenticated GET of healthPath.
+    // 2xx/3xx -> healthy; 401/403 -> credential rejected; anything else unhealthy.
+    async function restHealthCheck(entryRaw, credential) {
+        const entry = normalizeEntry(entryRaw);
+        if (entry.transport !== 'rest') throw new Error('not a REST connection');
+        const base = String(entry.url || '').replace(/\/+$/, '');
+        const hp = String(entry.healthPath || '/');
+        let u;
+        try { u = new URL(base + (hp.startsWith('/') ? hp : `/${hp}`)); } catch { throw new Error(`invalid healthPath for ${entry.name}`); }
+        await assertUrlAllowed(u.toString(), entry.trustedLocal);
+        const headers = {};
+        if (entry.auth !== 'none' && credential) {
+            const prefix = entry.authHeaderPrefix;
+            headers[entry.authHeaderName || 'X-API-Key'] = prefix ? `${prefix} ${credential}` : credential;
+        }
+        const resp = await withTimeout(fetch(u, { method: 'GET', headers, signal: AbortSignal.timeout(REST_TIMEOUT_MS) }), REST_TIMEOUT_MS + 2000, 'REST health check');
+        let snippet = '';
+        try { snippet = (await resp.text()).slice(0, 200); } catch { /* body optional */ }
+        return {
+            ok: resp.status >= 200 && resp.status < 400,
+            status: resp.status,
+            authRejected: resp.status === 401 || resp.status === 403,
+            snippet: redact(snippet),
+        };
+    }
+
+    function toolResultToText(result) {        if (!result) return '';
         if (typeof result.structuredContent === 'object' && result.structuredContent !== null) {
             try { return JSON.stringify(result.structuredContent, null, 1); } catch { /* fall through */ }
         }
@@ -444,12 +584,19 @@ function createMcpManager({ log } = {}) {
         };
     }
 
+    // Surface a REST health-check/test failure in the entry's admin view (rest
+    // entries have no transport whose error handler would set it).
+    function setEntryError(entryId, message) {
+        const st = stateFor(entryId);
+        st.error = message ? redact(String(message)) : null;
+    }
+
     async function closeAll() {
         say('[MCP] Shutting down all MCP connections');
         await Promise.all(Array.from(states.keys()).map((id) => disconnect(id, { silent: true })));
     }
 
-    return { connect, disconnect, disconnectAllFor, reconnect, callTool, statusView, redact, registerSecrets, registerSecretValue, toolAllowed, closeAll, _states: states };
+    return { connect, disconnect, disconnectAllFor, reconnect, callTool, callRestTool, restHealthCheck, setEntryError, statusView, redact, registerSecrets, registerSecretValue, toolAllowed, closeAll, _states: states };
 }
 
 module.exports = { createMcpManager, normalizeEntry, assertUrlAllowed, transportKeyFor, DEFAULT_TOOL_TIMEOUT_MS, MAX_TOOL_RESULT_CHARS };

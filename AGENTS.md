@@ -71,6 +71,27 @@ npm run dev
 `build`/`start`/`db:*` scripts target that scaffold, not the Lumo server.
 The Lumo app is the actual product: use `dev` or the direct node command.)
 
+## Direct REST API connections ("connections")
+
+The agent can call external REST APIs through governed connections:
+
+- **Admin adds a connection** — either in chat (`lumo__connection_create`:
+  agent collects name, base URL, auth header, allowed methods, then asks for
+  confirmation) or via Settings → MCP Servers / the import JSON box
+  (`transport: "rest"`). The API key itself is **never entered in chat** — the
+  agent returns a one-time setup URL where the key is entered in the browser
+  and stored AES-256-GCM-encrypted (`data/secret.key`).
+- **What the agent gets** — one governed tool per connection,
+  `<serverid>__api_request` (method constrained to the allowlist, path
+  relative to the base URL, query/body/extraHeaders). The credential is
+  injected server-side and never appears in args, results, or logs. Reach is
+  SSRF-guarded; only allowed methods pass.
+- **Validation is honest** — a connection only reaches `ready` after a real
+  authenticated health check (`healthPath`); a rejected key becomes
+  `needs_reauth`, never a silent success.
+- **MCP servers still work as before** — stdio/HTTP MCP servers with tool
+  discovery, per-user api_key/OAuth connections, tool cards in the UI.
+
 ## Verification checklist (for agents)
 
 After starting, confirm:

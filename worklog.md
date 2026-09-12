@@ -1,5 +1,22 @@
 
 ---
+Task ID: rest-connections-phase1
+Agent: ZCode (main)
+Task: Make the Lumo agent actually able to use external REST APIs (Plane.so scenario from the failed conversation)
+
+Work Log:
+- Root-caused the failed "connect Plane.so" conversation: (1) @modelcontextprotocol/sdk was never installed, so the automation MCP server sat at status=unavailable/tools=null and the agent had no http_request/store_data; (2) the agent system prompt forbade registering connections with no admin path — a dead end on a self-hosted single-admin instance; (3) no connection type existed for plain REST APIs (MCP-only), which pushed the old agent into asking for the API key in chat.
+- npm install in LumoOS/ → MCP SDK + openpgp installed; automation server now spawns.
+- New `rest` transport in mcp-manager.cjs: normalizeEntry fields (baseUrl/allowedMethods/authHeaderName/authHeaderPrefix/healthPath), connect() short-circuit (stateless, no MCP handshake), callRestTool (method allowlist, SSRF guard via assertUrlAllowed, server-side credential injection into the auth header, 15s timeout, 32KB result cap, redaction, 5xx → retryable tool error), restHealthCheck (2xx/3xx ok, 401/403 → auth rejected).
+- lumo-server.cjs: saveMcpEntry accepts transport rest (validation + toolPermissions.api_request='on' — the method allowlist IS the write opt-in); mcpServerView exposes rest fields; admin Test wired to the health check; buildMcpChatLoop advertises one governed `<serverid>__api_request` tool per ready rest connection; runMcpChatLoop dispatches rest targets to callRestTool; isAdmin plumbed from the chat request into control tools; MCP_SYSTEM_NOTE gained the RESULT HANDLING & RECOVERY ladder (classify results, bounded retries, verify writes by read-back, honest completion status — condensed from the self-extending-agent spec).
+- mcp-connections.cjs: validateConnection rest branch (real authenticated health check; wrong key → needs_reauth, never fake ready); connectionStatusFor rest views; new admin-gated lumo__connection_create control tool (confirm:true gate, creates the def via createRestServerDef, then returns the setup URL — key never touches chat); CONTROL_SYSTEM_NOTE rewritten: no more "administrator must add it" dead end for keyed REST APIs.
+- tests/rest-connections.test.cjs: stub REST API + stub OpenAI provider + full server (LUMO_TEST=1, temp data dir). 23 checks: unit (injection, allowlist, header-smuggling refusal, secret redaction, 5xx classification, health check) + E2E (signup admin → create def → wrong key needs_reauth → right key ready → catalog shows api_request → live chat round-trip executes the tool and returns real data → secret absent from stream).
+- Provisioned the real Plane.so connection on this instance (id=plane, X-API-Key, all methods, healthPath=/api/v1/users/me/, workspace slug itsmijsu.dev in the tool description). Key validated against the live API (HTTP 200).
+
+Result: PHASE 1 COMPLETE — agent can connect and use keyed REST APIs end-to-end in chat. Spec mapping: this is Phase 1 (execution/policy foundation) + the direct-API half of Phase 4 from the Agent OS implementation prompt; recovery ladder Levels 0–3 + 7 are in the prompt. Next phases (not started): durable runs/planner-executor, approval UI, tool factory/sandbox, automation hardening, multi-agent delegation.
+- NOTE: the Plane API key was pasted into chat history in the old conversation — it should be rotated; new connections never require that.
+
+---
 Task ID: lumoosv12-run
 Agent: main (Z.ai Code)
 Task: Clone https://github.com/mi7sudev/LumoOSv12.git and run the program

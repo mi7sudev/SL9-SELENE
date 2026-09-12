@@ -38,11 +38,12 @@ const CONTROL_PREFIX = 'lumo__';
 const CONTROL_SYSTEM_NOTE = [
     'Connection management (lumo__ tools):',
     '- When the user asks about connected services, or wants to connect, reconnect, or disconnect one, call lumo__connections_list first.',
-    '- Resolve loose product names (e.g. "Gmail", "Notion", "Slack") against that list. If nothing matches, tell the user the administrator must add that connection first. Never invent, register, or modify servers.',
-    '- lumo__connection_connect and lumo__connection_disconnect change external state; disconnect also permanently deletes the stored credential. Before the FIRST connect or disconnect call in a turn, ALWAYS ask a yes/no confirmation in chat and wait for the reply — even when the user\'s message is an imperative like "Connect my Gmail." or "Disconnect Slack.". Pass confirm:true only after an explicit affirmative REPLY from the user; the original request is not the confirmation.',
+    '- Resolve loose product names (e.g. "Gmail", "Notion", "Slack") against that list and offer lumo__connection_connect for the closest match.',
+    '- If nothing matches: on a self-hosted instance the user is usually the administrator, and a plain REST API (base URL + API key header) can be added right in chat with lumo__connection_create — collect the base URL, the auth header name (e.g. X-API-Key or Authorization), any header prefix (e.g. Bearer), and which HTTP methods they need, then confirm. Anything that is NOT a simple keyed REST API (stdio MCP servers, OAuth providers) still needs the administrator to add it via Settings → MCP Servers.',
+    '- lumo__connection_connect, lumo__connection_disconnect and lumo__connection_create change external state; disconnect also permanently deletes the stored credential. Before the FIRST such call in a turn, ALWAYS ask a yes/no confirmation in chat and wait for the reply — even when the user\'s message is an imperative like "Connect my Gmail." or "Disconnect Slack.". Pass confirm:true only after an explicit affirmative REPLY from the user; the original request is not the confirmation.',
     '- After starting an authorization, give the user the setup/authorize URL from the result and wait for them to finish it in their browser. NEVER claim a connection succeeded until lumo__connection_status reports "ready".',
-    '- Never ask the user to paste API keys, tokens, or passwords into chat. Direct them to the setup URL from the connect result.',
-    '- Status values: available (admin-configured, not yet connected), authorizing (waiting for the user to finish authorization), ready (validated and usable), failed (recoverable; retry connect), needs_reauth (credential rejected; connect again), revoked.',
+    '- Never ask the user to paste API keys, tokens, or passwords into chat. If the user starts typing one anyway, stop them and point at the setup URL from the connect/create result.',
+    '- Status values: available (configured, not yet connected), authorizing (waiting for the user to finish authorization), ready (validated and usable), failed (recoverable; retry connect), needs_reauth (credential rejected; connect again), revoked.',
 ].join('\n');
 
 const CONTROL_TOOL_DEFS = [
@@ -86,6 +87,28 @@ const CONTROL_TOOL_DEFS = [
     {
         type: 'function',
         function: {
+            name: `${CONTROL_PREFIX}connection_create`,
+            description: 'Administrator only: register a new DIRECT REST API connection so its api_request tool becomes available in chats. Use when the user asks to connect a plain REST API service and no matching connection exists. Collect the base URL, the auth header name (e.g. X-API-Key or Authorization), any header prefix (e.g. Bearer), and which HTTP methods they need; then ask a yes/no confirmation. The API key itself is entered by the user at the returned setup URL in their browser — never accept it in chat.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    name: { type: 'string', description: 'Short display name, e.g. "Plane.so"' },
+                    baseUrl: { type: 'string', description: 'API root, e.g. https://api.plane.so' },
+                    allowedMethods: { type: 'array', items: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] }, description: 'HTTP methods to allow. Default ["GET"]' },
+                    authHeaderName: { type: 'string', description: 'Header that carries the credential. Default "X-API-Key"' },
+                    authHeaderPrefix: { type: 'string', description: 'Prefix before the key value, e.g. "Bearer". Default: none' },
+                    healthPath: { type: 'string', description: 'Cheap authenticated GET path used to validate the key, e.g. "/api/v1/users/me/". Default "/"' },
+                    description: { type: 'string', description: 'What the API is for plus usage notes (pagination, rate limits). Shown to the model with the tool.' },
+                    confirm: { type: 'boolean', description: 'True only after the user confirmed in chat' },
+                },
+                required: ['name', 'baseUrl', 'confirm'],
+                additionalProperties: false,
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: `${CONTROL_PREFIX}connection_disconnect`,
             description: 'Revoke the current user\'s connection to an MCP server and permanently delete its stored credential. Only pass confirm:true after the user explicitly agreed in chat.',
             parameters: {
@@ -108,7 +131,9 @@ function randomToken(bytes = 24) { return crypto.randomBytes(bytes).toString('he
 // `store` is the SQLite store handle from store.cjs (the mcp_connections
 // table); `dataDir` still locates secret.key, which deliberately stays a
 // plain 0600 file so the encryption key never lives beside the ciphertext.
-function createConnectionService({ dataDir, log, nowIso, store, getServerDef, mcpManager }) {
+// `createRestServerDef` (admin module) persists a rest server definition for
+// the lumo__connection_create tool — chat never writes definitions directly.
+function createConnectionService({ dataDir, log, nowIso, store, getServerDef, createRestServerDef, mcpManager }) {
     const SECRET_KEY_FILE = path.join(dataDir, 'secret.key');
 
     const say = (...a) => { try { log && log(...a); } catch { /* logging never throws */ } };
@@ -222,12 +247,23 @@ function createConnectionService({ dataDir, log, nowIso, store, getServerDef, mc
         return 'not_discovered'; // disconnected / connecting: nothing discovered yet
     }
 
+    // The single governed tool of a rest (direct API) connection, classified by
+    // the admin's method allowlist (only-GET = read-only).
+    function restToolView(def) {
+        const writeCapable = ((def.allowedMethods || ['GET']).some((m) => m !== 'GET'));
+        return [{ name: 'api_request', classification: writeCapable ? 'write' : 'read-only' }];
+    }
+
     // Full user-facing view of one server definition (for catalog + control
     // tools). Tools are names + classification only — never schemas/env.
     function connectionStatusFor(def, uid) {
         const entry = def; // raw definition; manager normalizes
         if (!entry.enabled) return { serverId: entry.id, name: entry.name, auth: entry.auth || 'none', status: 'disabled', tools: null, lastDiscoveredAt: null };
         if (!entry.auth || entry.auth === 'none') {
+            if (entry.transport === 'rest') {
+                // rest is stateless: usable as soon as the def exists
+                return { serverId: entry.id, name: entry.name, auth: 'none', status: 'ready', tools: restToolView(entry), lastDiscoveredAt: null };
+            }
             const st = mcpManager.statusView(entry);
             return {
                 serverId: entry.id,
@@ -243,9 +279,13 @@ function createConnectionService({ dataDir, log, nowIso, store, getServerDef, mc
         let status = rec.status;
         let tools = null;
         if (rec.status === 'ready') {
-            const st = mcpManager.statusView(entry, { connection: { id: rec.id } });
-            if (st.status === 'error') status = 'unavailable';
-            else tools = st.tools.map((t) => ({ name: t.name, classification: t.classification }));
+            if (entry.transport === 'rest') {
+                tools = restToolView(entry);
+            } else {
+                const st = mcpManager.statusView(entry, { connection: { id: rec.id } });
+                if (st.status === 'error') status = 'unavailable';
+                else tools = st.tools.map((t) => ({ name: t.name, classification: t.classification }));
+            }
         }
         return {
             serverId: entry.id,
@@ -278,6 +318,27 @@ function createConnectionService({ dataDir, log, nowIso, store, getServerDef, mc
         let credential = null;
         try { credential = JSON.parse(decryptCredential(rec.credential) || 'null'); } catch { credential = null; }
         const credValue = credential && typeof credential.value === 'string' ? credential.value : '';
+        // REST (direct API) connections validate with a real authenticated
+        // health check of healthPath instead of an MCP connect + tools/list —
+        // a wrong key fails here, never silently.
+        if (def.transport === 'rest') {
+            updateRecord(rec.id, { status: 'connected', error: null });
+            try {
+                const hc = await mcpManager.restHealthCheck(def, credValue);
+                if (hc.ok) {
+                    updateRecord(rec.id, { status: 'ready', error: null, lastValidatedAt: nowIso(), lastDiscoveredAt: Date.now() });
+                    say(`[MCP-CONN] REST connection ready: ${def.name} (${def.id}) owner=${rec.ownerUid} health=HTTP ${hc.status}`);
+                } else {
+                    const code = hc.authRejected ? 'auth_rejected' : 'validation_failed';
+                    updateRecord(rec.id, { status: code === 'auth_rejected' ? 'needs_reauth' : 'failed', error: { code, status: hc.status } });
+                    say(`[MCP-CONN] REST connection validation failed: ${def.name} (${def.id}): HTTP ${hc.status}`);
+                }
+            } catch (e) {
+                updateRecord(rec.id, { status: 'failed', error: { code: 'validation_failed' } });
+                say(`[MCP-CONN] REST connection validation failed: ${def.name} (${def.id}): ${mcpManager.redact(String((e && e.message) || e))}`);
+            }
+            return findConnectionById(rec.id);
+        }
         updateRecord(rec.id, { status: 'connected', error: null });
         try {
             // explicit discovering state: the connect succeeded, now we're
@@ -311,6 +372,58 @@ function createConnectionService({ dataDir, log, nowIso, store, getServerDef, mc
             say(`[MCP-CONN] connection validation failed: ${def.name} (${def.id}): ${mcpManager.redact(msg)}`);
         }
         return findConnectionById(rec.id);
+    }
+
+    // ── admin-gated in-chat REST connection creation (lumo__connection_create)
+    // Chat proposes; the runtime authorizes: admin role is enforced here, the
+    // definition is saved through the admin module's createRestServerDef, and
+    // the API key is collected afterwards at the /mcp/setup/<flow> page —
+    // never in chat.
+    const REST_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+    async function createRestConnection({ args, uid, isAdmin, baseUrl }) {
+        if (!isAdmin) {
+            return { ok: false, error: 'admin_only', message: 'Only the administrator of this instance can register new REST connections.' };
+        }
+        const a = args && typeof args === 'object' ? args : {};
+        const name = String(a.name || '').trim().slice(0, 80);
+        const url = String(a.baseUrl || '').trim().replace(/\/+$/, '');
+        if (!name) return { ok: false, error: 'missing_name', message: 'A short display name is required (e.g. "Plane.so").' };
+        if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'invalid_base_url', message: 'baseUrl must be an http(s) URL, e.g. https://api.plane.so' };
+        if (a.confirm !== true) {
+            return { ok: false, needsConfirmation: true, name, message: `Ask the user to confirm creating the REST connection "${name}" -> ${url} before proceeding.` };
+        }
+        let methods = Array.isArray(a.allowedMethods) ? a.allowedMethods.map((m) => String(m).toUpperCase()).filter((m) => REST_METHODS.includes(m)) : ['GET'];
+        if (!methods.length) methods = ['GET'];
+        if (typeof createRestServerDef !== 'function') return { ok: false, error: 'not_supported', message: 'REST connection creation is not available on this instance.' };
+        const built = await createRestServerDef({
+            name,
+            url,
+            allowedMethods: methods,
+            authHeaderName: String(a.authHeaderName || 'X-API-Key').trim().slice(0, 64) || 'X-API-Key',
+            authHeaderPrefix: typeof a.authHeaderPrefix === 'string' ? a.authHeaderPrefix : '',
+            healthPath: String(a.healthPath || '/').trim() || '/',
+            description: String(a.description || '').slice(0, 500),
+        });
+        if (!built || !built.ok || !built.def) {
+            return { ok: false, error: (built && built.error) || 'create_failed', message: 'Could not save the connection definition.' };
+        }
+        const def = built.def;
+        say(`[MCP-CONN] REST connection created via chat: ${def.id} (${def.name}) methods=${def.allowedMethods.join(',')} admin=${uid}`);
+        // straight into the existing api_key authorization flow -> setup URL
+        const start = await startConnect({ serverId: def.id, uid, confirm: true, baseUrl });
+        if (!start.ok) {
+            return { ok: false, error: start.error || 'connect_failed', serverId: def.id, name: def.name, message: start.message };
+        }
+        return {
+            ok: true,
+            created: true,
+            serverId: def.id,
+            name: def.name,
+            status: start.status,
+            setupUrl: start.setupUrl,
+            allowedMethods: def.allowedMethods,
+            message: `REST connection "${def.name}" registered (methods: ${def.allowedMethods.join(', ')}). Give the user this setup URL to enter their API key in the browser — never accept the key in chat. Then verify with lumo__connection_status before claiming success.`,
+        };
     }
 
     // ── lifecycle operations (used by control tools AND HTTP endpoints) ──────
@@ -496,11 +609,15 @@ function createConnectionService({ dataDir, log, nowIso, store, getServerDef, mc
 
     // Returns { isError, text } for the chat loop. Text is JSON; it never
     // contains credential material.
-    async function executeControlTool({ name, args, uid, baseUrl }) {
+    async function executeControlTool({ name, args, uid, baseUrl, isAdmin }) {
         const a = args && typeof args === 'object' ? args : {};
         try {
             if (name === `${CONTROL_PREFIX}connections_list`) {
                 return { isError: false, text: JSON.stringify(connectionsListFor(uid)) };
+            }
+            if (name === `${CONTROL_PREFIX}connection_create`) {
+                const r = await createRestConnection({ args: a, uid, isAdmin: isAdmin === true, baseUrl });
+                return { isError: r.ok === false && !r.needsConfirmation, text: JSON.stringify(r) };
             }
             if (name === `${CONTROL_PREFIX}connection_connect`) {
                 const r = await startConnect({ serverId: a.serverId, uid, confirm: a.confirm === true, baseUrl });
