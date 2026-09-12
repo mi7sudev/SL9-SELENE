@@ -151,3 +151,21 @@ Work Log:
 Stage Summary:
 - Tool-result cards now fully collapsible: View tool result <-> Hide tool result toggle always visible, chevron rotates, aria-expanded tracked; verified on desktop + mobile in the real product with real MCP tool traces; vendor SRI chain intact (0 mismatches) and cache-busted (?v=16 chunk, ?v=61 boot runtime).
 - Artifacts: LumoOS/patch-toolcard-collapse.cjs (re-runnable), LumoOS/diag-all-runtime-integrity.cjs (now usable on Linux), screenshots tc-1..3 in /home/z/SL9-SELENE/.
+---
+Task ID: proton-dsh-alignment-audit
+Agent: main (Z.ai Code)
+Task: Deep-audit deepseek-ai/deepseek-harness as orchestration inspiration; source-alignment audit of LumoOS against actual Proton Lumo source (WebClients/applications/lumo @ ab7b6184); implement only minimal alignment fixes; preserve BYOK/self-hosting.
+
+Work Log:
+- Cloned references: /home/z/deepseek-harness-audit (dsh, Cordis-based agent harness) and /home/z/proton-webclients-ref (sparse: applications/lumo only, commit ab7b6184).
+- Ran two Explore agents: (1) dsh internals — agent loop turn/step, guarded tool pipeline (pre-execute/guard/around/post-execute), approval seam (fail-closed, allowed-once), durable session log, subagent provider seam, MCP client (mcp__server__tool naming, atomic generation swaps); (2) Proton lumo src — full REST contract (/api/lumo/v1/*), SSE frame vocabulary (token_data/server_tool_call/usage/done/tool-error...), tool-trace UI (ThinkingPath.tsx useState isExpanded, native one-way expand), NO BYOK, NO MCP in Proton source.
+- Inventoried LumoOS backend (lumo-server.cjs 3056 lines + mcp-connections/store/mcp-manager/agent-os/*) against both references; ran 63-test suite (pass), SRI integrity diag (1272 checked, 0 mismatches), confirmed tool-card collapse patch applied.
+- EMPIRICALLY CONFIRMED regression (cat-3): title-gen broken for everyone — `const asked` reassigned (TypeError->502 for admin, live proof) and substitution placed AFTER the non-admin allow-list gate (400 model_not_selected). Reproduced with stub-provider harness before/after fix.
+- Fixed minimal set in lumo-server.cjs ONLY: (1) let asked + moved title-gen substitution before allow-list gate; (2) /api/lumo/v1/events stub returns canonical {LumoSpaces:null,...} shape per Proton mock-server contract; (3) assets POST persists AssetType + GET /assets/generated implemented (AssetType/CreateTimeSince/CreateTimeUntil filters, tag echo); (4) message POST accepts ParentId fallback (client sends both); (5) space DELETE now cascades DeleteTime to assets (gallery consistency).
+- Restarted product (port-bridge :3000 -> lumo-server :8090, PID after restart), cleaned all audit test data (space/asset deleted, gallery verified empty).
+- Browser E2E verified: guest page renders; admin login; live MCP loop chat (connections_list executed: Lumo Automation ready, DeepWiki ready, Plane.so ready w/ 26 dormant write tools, GitHub API not connected); tool trace expand/collapse bidirectional ("View tool result" <-> "Hide tool result"); AI-generated conversation title appears in sidebar (title-gen fix proven in real UI); mobile 390x844 renders; no new console errors (pre-existing legacy-row deserialization errors only, documented in prior worklog).
+
+Stage Summary:
+- Alignment report delivered (4-category classification). Code changes: LumoOS/lumo-server.cjs only (~70 lines), all 63 tests pass, dist untouched (integrity 0 mismatches).
+- Key evidence: Proton source has NO BYOK and NO MCP -> those LumoOS layers are category-2 intentional adaptations by definition; the agent control plane (lumo__server_add, service_lookup, tool_permission, agent-os recovery ladder/tool factory) is fully implemented and live-verified.
+- Proton reference checkout kept at /home/z/proton-webclients-ref for future audits (commit ab7b6184).

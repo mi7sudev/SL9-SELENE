@@ -1,0 +1,666 @@
+     1→     1→import { getClientID } from '@proton/shared/lib/apps/helper';
+     2→     2→import { getAppVersionHeaders } from '@proton/shared/lib/fetch/headers';
+     3→     3→
+     4→     4→import config from '../config';
+     5→     5→import { ClientError, ConflictClientError, LimitReachedError } from '../redux/sagas/sagaErrors';
+     6→     6→import type { Base64, MasterKey, MessageId, ProtonApiResponse } from '../types';
+     7→     7→import { LUMO_ELIGIBILITY, isProtonApiResponse, isRemoteId } from '../types';
+     8→     8→import { listify } from '../util/collections';
+     9→     9→import { dateToUnixTimestamp } from '../util/date';
+    10→    10→import { objectFilterV } from '../util/objects';
+    11→    11→import {
+    12→    12→    convertAssetFromApi,
+    13→    13→    convertConversationFromApi,
+    14→    14→    convertMasterKeysFromApi,
+    15→    15→    convertMessageFromApi,
+    16→    16→    convertSpaceFromApi,
+    17→    17→    convertSpacesFromApi,
+    18→    18→    convertUserSettingsFromApi,
+    19→    19→} from './conversion';
+    20→    20→import { type Priority, RequestScheduler } from './scheduler';
+    21→    21→import type {
+    22→    22→    ConversationTag,
+    23→    23→    ConversationToApi,
+    24→    24→    GetConversationRemote,
+    25→    25→    GetSpaceRemote,
+    26→    26→    ListSpacesRemote,
+    27→    27→    LocalId,
+    28→    28→    MasterKeyFromApi,
+    29→    29→    MasterKeyToApi,
+    30→    30→    MessageToApi,
+    31→    31→    NewAssetToApi,
+    32→    32→    NewConversationToApi,
+    33→    33→    NewMessageToApi,
+    34→    34→    NewSpaceToApi,
+    35→    35→    RemoteDeletedAsset,
+    36→    36→    RemoteDeletedAttachment,
+    37→    37→    RemoteFilledAsset,
+    38→    38→    RemoteFilledAttachment,
+    39→    39→    RemoteId,
+    40→    40→    RemoteMessage,
+    41→    41→    SerializedUserSettings,
+    42→    42→    SpaceTag,
+    43→    43→    SpaceToApi,
+    44→    44→    UserSettingsFromApi,
+    45→    45→    UserSettingsToApi,
+    46→    46→} from './types';
+    47→    47→import { objectToPascalCaseKeys, oldestDateReducer } from './util';
+    48→    48→
+    49→    49→export type RemoteStatus = 'ok' | 'deleted';
+    50→    50→export type ResourceName =
+    51→    51→    'masterkeys' | 'spaces' | 'conversations' | 'messages' | 'assets' | 'personalization' | 'settings';
+    52→    52→
+    53→    53→// prettier-ignore
+    54→    54→type PostableResource =
+    55→    55→    | NewMessageToApi
+    56→    56→    | NewConversationToApi
+    57→    57→    | NewSpaceToApi
+    58→    58→    | NewAssetToApi
+    59→    59→    | MasterKeyFromApi
+    60→    60→    | UserSettingsToApi
+    61→    61→    ;
+    62→    62→
+    63→    63→// prettier-ignore
+    64→    64→type PuttableResource =
+    65→    65→    | ConversationToApi
+    66→    66→    | SpaceToApi
+    67→    67→    | { ID: RemoteId; SpaceID: RemoteId; Encrypted?: Base64; AssetTag: string }; // AssetToApi
+    68→    68→
+    69→    69→export type ListSpacesParams = {
+    70→    70→    createTimeUntil?: number; // unix timestamp (seconds)
+    71→    71→    createTimeSince?: number; // unix timestamp (seconds)
+    72→    72→};
+    73→    73→
+    74→    74→export enum AssetType {
+    75→    75→    Generic = 0,
+    76→    76→    GeneratedImage = 1,
+    77→    77→    GeneratedVideo = 2,
+    78→    78→    GeneratedDoc = 3,
+    79→    79→}
+    80→    80→
+    81→    81→export type ListGeneratedAssetsParams = {
+    82→    82→    assetType?: AssetType;
+    83→    83→    createTimeSince?: number; // unix timestamp (seconds)
+    84→    84→    createTimeUntil?: number; // unix timestamp (seconds)
+    85→    85→};
+    86→    86→
+    87→    87→export type GeneratedAssetFromApi = {
+    88→    88→    ID: string;
+    89→    89→    SpaceID: string;
+    90→    90→    AssetTag: string;
+    91→    91→    CreateTime: string;
+    92→    92→    Encrypted?: string | null;
+    93→    93→    DeleteTime?: string | null;
+    94→    94→};
+    95→    95→
+    96→    96→type LimitReachableResource = 'messages' | 'assets' | 'conversations' | 'spaces';
+    97→    97→
+    98→    98→function isLimitReachableResource(resourceName: ResourceName): resourceName is LimitReachableResource {
+    99→    99→    return (
+   100→   100→        resourceName === 'messages' ||
+   101→   101→        resourceName === 'assets' ||
+   102→   102→        resourceName === 'conversations' ||
+   103→   103→        resourceName === 'spaces'
+   104→   104→    );
+   105→   105→}
+   106→   106→
+   107→   107→const idExtractorMap: Record<ResourceName, (json: object) => RemoteId | undefined> = {
+   108→   108→    messages: (json) => (json as any)?.Message?.ID,
+   109→   109→    conversations: (json) => (json as any)?.Conversation?.ID,
+   110→   110→    spaces: (json) => (json as any)?.Space?.ID,
+   111→   111→    assets: (json) => (json as any)?.Asset?.ID,
+   112→   112→    masterkeys: () => undefined,
+   113→   113→    personalization: () => undefined,
+   114→   114→    settings: () => undefined,
+   115→   115→};
+   116→   116→
+   117→   117→export interface LumoApi {
+   118→   118→    postSpace(spaceArgs: NewSpaceToApi, priority: Priority): Promise<RemoteId | null>;
+   119→   119→    putSpace(spaceArgs: SpaceToApi, priority: Priority): Promise<RemoteStatus>;
+   120→   120→    deleteSpace(spaceId: RemoteId, priority: Priority): Promise<RemoteStatus>;
+   121→   121→    listSpaces(): Promise<ListSpacesRemote>;
+   122→   122→    getSpace(spaceId: RemoteId): Promise<GetSpaceRemote | null>;
+   123→   123→
+   124→   124→    postConversation(convArgs: NewConversationToApi, priority: Priority): Promise<RemoteId | null>;
+   125→   125→    putConversation(convArgs: ConversationToApi, priority: Priority): Promise<RemoteStatus>;
+   126→   126→    deleteConversation(convId: RemoteId, priority: Priority): Promise<RemoteStatus>;
+   127→   127→    getConversation(convId: RemoteId, spaceId: LocalId): Promise<GetConversationRemote | null>;
+   128→   128→
+   129→   129→    postMessage(messageArgs: NewMessageToApi, priority: Priority): Promise<RemoteId | null>;
+   130→   130→    getMessage(
+   131→   131→        messageId: RemoteId,
+   132→   132→        conversationId: LocalId,
+   133→   133→        parentId: LocalId | undefined,
+   134→   134→        remoteConversationId: RemoteId | undefined
+   135→   135→    ): Promise<RemoteMessage | null>;
+   136→   136→
+   137→   137→    postAttachment(attachmentArgs: NewAssetToApi, priority: Priority): Promise<RemoteId | null>;
+   138→   138→    deleteAttachment(attachmentId: RemoteId, priority: Priority): Promise<RemoteStatus>;
+   139→   139→    getAttachment(
+   140→   140→        attachmentId: RemoteId,
+   141→   141→        spaceId: LocalId
+   142→   142→    ): Promise<RemoteFilledAttachment | RemoteDeletedAttachment | null>;
+   143→   143→
+   144→   144→    postAsset(assetArgs: NewAssetToApi, priority: Priority): Promise<RemoteId | null>;
+   145→   145→    deleteAsset(assetId: RemoteId, priority: Priority): Promise<RemoteStatus>;
+   146→   146→    getAsset(assetId: RemoteId, spaceId: LocalId): Promise<RemoteFilledAsset | RemoteDeletedAsset | null>;
+   147→   147→
+   148→   148→    // User settings methods
+   149→   149→    getUserSettings(): Promise<SerializedUserSettings | null>;
+   150→   150→    postUserSettings(userSettingsArgs: UserSettingsToApi): Promise<RemoteStatus>;
+   151→   151→    putUserSettings(userSettingsArgs: UserSettingsToApi): Promise<RemoteStatus>;
+   152→   152→}
+   153→   153→
+   154→   154→export class LumoApi {
+   155→   155→    private uid: string | undefined;
+   156→   156→
+   157→   157→    private scheduler = new RequestScheduler(5);
+   158→   158→
+   159→   159→    constructor(uid?: string) {
+   160→   160→        this.uid = uid;
+   161→   161→    }
+   162→   162→
+   163→   163→    private protonHeaders() {
+   164→   164→        if (!this.uid) {
+   165→   165→            throw new Error('UID must be set before making API calls.');
+   166→   166→        }
+   167→   167→
+   168→   168→        return {
+   169→   169→            ...getAppVersionHeaders(getClientID(config.APP_NAME), config.APP_VERSION),
+   170→   170→            'x-pm-uid': this.uid,
+   171→   171→        };
+   172→   172→    }
+   173→   173→
+   174→   174→    public setUid(uid: string) {
+   175→   175→        this.uid = uid;
+   176→   176→    }
+   177→   177→
+   178→   178→    private async callPostJson(
+   179→   179→        resourceName: ResourceName,
+   180→   180→        resource: PostableResource,
+   181→   181→        path?: string
+   182→   182→    ): Promise<RemoteId> {
+   183→   183→        const response = await this.sendPostJson(resourceName, resource, path);
+   184→   184→        const json = await response.json();
+   185→   185→        if (!response.ok) {
+   186→   186→            if (response.status === 409) {
+   187→   187→                throw new ConflictClientError(`Error during POST ${resourceName}: resource already exists`);
+   188→   188→            } else if (response.status === 422 && isLimitReachableResource(resourceName)) {
+   189→   189→                // The backend returns 422 when a per-resource limit is reached (e.g.
+   190→   190→                // MAX_MESSAGES_PER_CONVERSATION, MAX_ASSETS_PER_SPACE, etc.).
+   191→   191→                const code = isProtonApiResponse(json) ? json.Code : undefined;
+   192→   192→                const serverMessage =
+   193→   193→                    (json && typeof (json as any).Error === 'string' && (json as any).Error) || undefined;
+   194→   194→                throw new LimitReachedError(resourceName, { serverMessage, code });
+   195→   195→            } else if (response.status >= 400 && response.status < 500) {
+   196→   196→                // 4xx don't retry
+   197→   197→                throw new ClientError(`Error during POST ${resourceName}: got ${response.status}`);
+   198→   198→            }
+   199→   199→            throw new Error(`Error during POST ${resourceName}: got ${response.status}`);
+   200→   200→        }
+   201→   201→        const idExtractor = idExtractorMap[resourceName];
+   202→   202→        if (!idExtractor) {
+   203→   203→            throw new Error('Unknown resource name');
+   204→   204→        }
+   205→   205→
+   206→   206→        const remoteId = idExtractor(json);
+   207→   207→        if (!remoteId) {
+   208→   208→            throw new Error("POST: can't find remote ID in response");
+   209→   209→        }
+   210→   210→        if (!isRemoteId(remoteId)) {
+   211→   211→            throw new Error('POST: invalid remote ID in response');
+   212→   212→        }
+   213→   213→
+   214→   214→        return remoteId;
+   215→   215→    }
+   216→   216→
+   217→   217→    private async sendPostJson(
+   218→   218→        resourceName: ResourceName,
+   219→   219→        resource: PostableResource,
+   220→   220→        path?: string
+   221→   221→    ): Promise<Response> {
+   222→   222→        path = !path ? `/${resourceName}` : path.startsWith('/') ? path : `/${path}`;
+   223→   223→        const url = `/api/lumo/v1${path}`;
+   224→   224→        console.log(`lumo api: http post ${url} <-`, resource);
+   225→   225→        const response = await fetch(url, {
+   226→   226→            method: 'POST',
+   227→   227→            headers: {
+   228→   228→                'Content-Type': 'application/json',
+   229→   229→                ...this.protonHeaders(),
+   230→   230→            },
+   231→   231→            body: JSON.stringify(resource),
+   232→   232→        });
+   233→   233→
+   234→   234→        if (response.ok) {
+   235→   235→            return response;
+   236→   236→        } else {
+   237→   237→            if (response.status >= 400 && response.status < 500) {
+   238→   238→                return response;
+   239→   239→            }
+   240→   240→            throw new Error(`Error during POST ${resourceName}: got ${response.status}`);
+   241→   241→        }
+   242→   242→    }
+   243→   243→
+   244→   244→    private async sendPutJson(
+   245→   245→        resourceName: ResourceName,
+   246→   246→        resource: PostableResource,
+   247→   247→        path?: string
+   248→   248→    ): Promise<Response> {
+   249→   249→        path = !path ? `/${resourceName}` : path.startsWith('/') ? path : `/${path}`;
+   250→   250→        const url = `/api/lumo/v1${path}`;
+   251→   251→        console.log(`lumo api: http put ${url} <-`, resource);
+   252→   252→        const response = await fetch(url, {
+   253→   253→            method: 'PUT',
+   254→   254→            headers: {
+   255→   255→                'Content-Type': 'application/json',
+   256→   256→                ...this.protonHeaders(),
+   257→   257→            },
+   258→   258→            body: JSON.stringify(resource),
+   259→   259→        });
+   260→   260→        return response;
+   261→   261→    }
+   262→   262→
+   263→   263→    private async callPutJson(
+   264→   264→        resourceName: ResourceName,
+   265→   265→        resource: PuttableResource,
+   266→   266→        path?: string
+   267→   267→    ): Promise<RemoteStatus> {
+   268→   268→        path = !path ? `/${resourceName}/${resource.ID}` : path.startsWith('/') ? path : `/${path}`;
+   269→   269→        const url = `/api/lumo/v1${path}`;
+   270→   270→        console.log(`lumo api: http put ${url} <-`, resource);
+   271→   271→        const response = await fetch(url, {
+   272→   272→            method: 'PUT',
+   273→   273→            headers: {
+   274→   274→                'Content-Type': 'application/json',
+   275→   275→                ...this.protonHeaders(),
+   276→   276→            },
+   277→   277→            body: JSON.stringify(resource),
+   278→   278→        });
+   279→   279→        if (response.status === 422) {
+   280→   280→            const json = response.json();
+   281→   281→            if (!isProtonApiResponse(json)) {
+   282→   282→                throw new Error('Proton response error: expected an object of type ProtonApiResponse');
+   283→   283→            }
+   284→   284→            if (json.Code === 2501) {
+   285→   285→                return 'deleted';
+   286→   286→            } else {
+   287→   287→                throw new Error(`Proton response error: unexpected error code ${json.Code}`);
+   288→   288→            }
+   289→   289→        } else if (response.ok) {
+   290→   290→            return 'ok';
+   291→   291→        } else {
+   292→   292→            throw new Error(`HTTP error: got ${response.status}`);
+   293→   293→        }
+   294→   294→    }
+   295→   295→
+   296→   296→    private async callListJson(resourceName: ResourceName, params?: Record<string, any>): Promise<any> {
+   297→   297→        let url = `/api/lumo/v1/${resourceName}`;
+   298→   298→        if (params) {
+   299→   299→            params = objectFilterV(params, (v) => v !== undefined);
+   300→   300→            const urlParams = new URLSearchParams(params);
+   301→   301→            url += `?${urlParams}`;
+   302→   302→        }
+   303→   303→        console.log(`lumo api: http get ${url} <- params:`, params || 'none');
+   304→   304→        const response = await fetch(url, {
+   305→   305→            method: 'GET',
+   306→   306→            headers: this.protonHeaders(),
+   307→   307→        });
+   308→   308→        if (response.ok) {
+   309→   309→            return response.json();
+   310→   310→        } else {
+   311→   311→            throw new Error(`HTTP error: got ${response.status}`);
+   312→   312→        }
+   313→   313→    }
+   314→   314→
+   315→   315→    private async callGetJson(resourceName: ResourceName, id: RemoteId): Promise<ProtonApiResponse | null> {
+   316→   316→        const url = `/api/lumo/v1/${resourceName}/${id}`;
+   317→   317→        console.log(`lumo api: http get ${url}`);
+   318→   318→        const response = await fetch(url, {
+   319→   319→            method: 'GET',
+   320→   320→            headers: this.protonHeaders(),
+   321→   321→        });
+   322→   322→        if (response.status === 422) {
+   323→   323→            const json = await response.json();
+   324→   324→            if (!isProtonApiResponse(json)) {
+   325→   325→                throw new Error('Proton response error: expected an object of type ProtonApiResponse');
+   326→   326→            }
+   327→   327→            if (json.Code === 2501) {
+   328→   328→                return null;
+   329→   329→            } else {
+   330→   330→                throw new Error(`Proton response error: unexpected error code ${json.Code}`);
+   331→   331→            }
+   332→   332→        } else if (response.ok) {
+   333→   333→            const json = await response.json();
+   334→   334→            if (!isProtonApiResponse(json)) {
+   335→   335→                throw new Error('Proton response error: expected an object of type ProtonApiResponse');
+   336→   336→            }
+   337→   337→            if (json.Code !== 1000) {
+   338→   338→                throw new Error(`Proton response error: unexpected code ${json.Code}`);
+   339→   339→            }
+   340→   340→            return json;
+   341→   341→        } else {
+   342→   342→            throw new Error(`HTTP error: got ${response.status}`);
+   343→   343→        }
+   344→   344→    }
+   345→   345→
+   346→   346→    private async callDelete(resourceName: ResourceName, id: RemoteId): Promise<RemoteStatus> {
+   347→   347→        const url = `/api/lumo/v1/${resourceName}/${id}`;
+   348→   348→        console.log(`lumo api: http delete ${url}`);
+   349→   349→        const response = await fetch(url, {
+   350→   350→            method: 'DELETE',
+   351→   351→            headers: this.protonHeaders(),
+   352→   352→        });
+   353→   353→        if (response.ok) {
+   354→   354→            return 'ok';
+   355→   355→        } else if (response.status === 422) {
+   356→   356→            const json = await response.json();
+   357→   357→            if (!isProtonApiResponse(json)) {
+   358→   358→                throw new Error('Proton response error: expected an object of type ProtonApiResponse');
+   359→   359→            }
+   360→   360→            if (json.Code === 2501) {
+   361→   361→                return 'deleted';
+   362→   362→            } else {
+   363→   363→                throw new Error(`Proton response error: unexpected error code ${json.Code}`);
+   364→   364→            }
+   365→   365→        } else if (response.status >= 400 && response.status < 500) {
+   366→   366→            // 4xx don't retry
+   367→   367→            throw new ClientError(`Error during DELETE ${resourceName}: got ${response.status}`);
+   368→   368→        } else {
+   369→   369→            throw new Error(`HTTP error: got ${response.status}`);
+   370→   370→        }
+   371→   371→    }
+   372→   372→
+   373→   373→    public async callDeleteAllSpaces(): Promise<RemoteStatus> {
+   374→   374→        const url = `/api/lumo/v1/spaces`;
+   375→   375→        console.log(`lumo api: http delete all space ${url}`);
+   376→   376→        const response = await fetch(url, {
+   377→   377→            method: 'DELETE',
+   378→   378→            headers: this.protonHeaders(),
+   379→   379→        });
+   380→   380→        if (response.ok) {
+   381→   381→            return 'ok';
+   382→   382→        } else if (response.status === 422) {
+   383→   383→            const json = await response.json();
+   384→   384→            if (!isProtonApiResponse(json)) {
+   385→   385→                throw new Error('Proton response error: expected an object of type ProtonApiResponse');
+   386→   386→            }
+   387→   387→            if (json.Code === 2501) {
+   388→   388→                return 'deleted';
+   389→   389→            } else {
+   390→   390→                throw new Error(`Proton response error: unexpected error code ${json.Code}`);
+   391→   391→            }
+   392→   392→        } else if (response.status >= 400 && response.status < 500) {
+   393→   393→            // 4xx don't retry
+   394→   394→            throw new ClientError(`Error during DELETE all spaces: got ${response.status}`);
+   395→   395→        } else {
+   396→   396→            throw new Error(`HTTP error: got ${response.status}`);
+   397→   397→        }
+   398→   398→    }
+   399→   399→
+   400→   400→    // BE response dependent on FF
+   401→   401→    public async getMasterKey(): Promise<{ eligibility: number; key: Base64 | null }> {
+   402→   402→        const data = await this.callListJson('masterkeys');
+   403→   403→        const eligibility = data.Eligibility;
+   404→   404→
+   405→   405→        if (eligibility !== LUMO_ELIGIBILITY.Eligible) {
+   406→   406→            return { eligibility, key: null };
+   407→   407→        }
+   408→   408→
+   409→   409→        const keys = convertMasterKeysFromApi(data.MasterKeys);
+   410→   410→
+   411→   411→        if (keys.length === 0) {
+   412→   412→            return { eligibility, key: null };
+   413→   413→        }
+   414→   414→
+   415→   415→        const key = this.findBestKey(keys);
+   416→   416→        return { eligibility, key: key.masterKey };
+   417→   417→    }
+   418→   418→
+   419→   419→    private findBestKey(keys: []): undefined;
+   420→   420→    private findBestKey(keys: MasterKey[]): MasterKey;
+   421→   421→    private findBestKey(keys: MasterKey[]): MasterKey | undefined {
+   422→   422→        return keys.reduce((best: MasterKey | undefined, current: MasterKey) => {
+   423→   423→            if (!best) return current;
+   424→   424→            if (current.isLatest && !best.isLatest) {
+   425→   425→                return current;
+   426→   426→            } else if (!current.isLatest && best.isLatest) {
+   427→   427→                return best;
+   428→   428→            } else if (current.version > best.version) {
+   429→   429→                return current;
+   430→   430→            } else if (current.version < best.version) {
+   431→   431→                return best;
+   432→   432→            } else {
+   433→   433→                // Compare by createdAt if isLatest and version are the same
+   434→   434→                const currentCreatedAt = new Date(current.createdAt);
+   435→   435→                const bestCreatedAt = new Date(best.createdAt);
+   436→   436→                if (currentCreatedAt > bestCreatedAt) {
+   437→   437→                    return current;
+   438→   438→                } else if (currentCreatedAt < bestCreatedAt) {
+   439→   439→                    return best;
+   440→   440→                } else {
+   441→   441→                    // In case createdAt is the same(!) we need to make a choice,
+   442→   442→                    // let's take the lowest id
+   443→   443→                    if (current.id < best.id) {
+   444→   444→                        return current;
+   445→   445→                    } else {
+   446→   446→                        return best;
+   447→   447→                    }
+   448→   448→                }
+   449→   449→            }
+   450→   450→        }, undefined);
+   451→   451→    }
+   452→   452→
+   453→   453→    public async postMasterKey(masterKeyToApi: MasterKeyToApi) {
+   454→   454→        const response = await this.sendPostJson('masterkeys', masterKeyToApi);
+   455→   455→        if (!response.ok) {
+   456→   456→            throw new Error(`Failed to POST master key: got ${response.status}`);
+   457→   457→        }
+   458→   458→    }
+   459→   459→
+   460→   460→    // User settings methods
+   461→   461→    public async getUserSettings(): Promise<SerializedUserSettings | null> {
+   462→   462→        try {
+   463→   463→            const data = await this.callListJson('settings');
+   464→   464→            const userSettingsFromApi = data?.UserSettings as UserSettingsFromApi;
+   465→   465→
+   466→   466→            if (!userSettingsFromApi) {
+   467→   467→                return null;
+   468→   468→            }
+   469→   469→            return convertUserSettingsFromApi(userSettingsFromApi);
+   470→   470→        } catch (error) {
+   471→   471→            console.warn('Failed to get user settings:', error);
+   472→   472→            return null;
+   473→   473→        }
+   474→   474→    }
+   475→   475→
+   476→   476→    public async postUserSettings(userSettingsArgs: UserSettingsToApi): Promise<RemoteStatus> {
+   477→   477→        const response = await this.sendPostJson('settings', userSettingsArgs);
+   478→   478→        if (!response.ok) {
+   479→   479→            throw new Error(`Failed to POST user settings: got ${response.status}`);
+   480→   480→        }
+   481→   481→        return 'ok';
+   482→   482→    }
+   483→   483→
+   484→   484→    public async putUserSettings(userSettingsArgs: UserSettingsToApi): Promise<RemoteStatus> {
+   485→   485→        const response = await this.sendPutJson('settings', userSettingsArgs);
+   486→   486→        if (!response.ok) {
+   487→   487→            throw new Error(`Failed to PUT user settings: got ${response.status}`);
+   488→   488→        }
+   489→   489→        return 'ok';
+   490→   490→    }
+   491→   491→
+   492→   492→    public postSpace(space: NewSpaceToApi, priority: Priority): Promise<RemoteId> {
+   493→   493→        const fn = () => this.callPostJson('spaces', space);
+   494→   494→        return this.scheduler.schedule(fn, priority);
+   495→   495→    }
+   496→   496→
+   497→   497→    public postConversation(conversation: NewConversationToApi, priority: Priority): Promise<RemoteId> {
+   498→   498→        const path = `/spaces/${conversation.SpaceID}/conversations`;
+   499→   499→        const fn = () => this.callPostJson('conversations', conversation, path);
+   500→   500→        return this.scheduler.schedule(fn, priority);
+   501→   501→    }
+   502→   502→
+   503→   503→    public postMessage(message: MessageToApi | NewMessageToApi, priority: Priority): Promise<RemoteId> {
+   504→   504→        const path = `/conversations/${message.ConversationID}/messages`;
+   505→   505→        const fn = () => this.callPostJson('messages', message, path);
+   506→   506→        return this.scheduler.schedule(fn, priority);
+   507→   507→    }
+   508→   508→
+   509→   509→    public putSpace(space: SpaceToApi, priority: Priority): Promise<RemoteStatus> {
+   510→   510→        const fn = () => this.callPutJson('spaces', space);
+   511→   511→        return this.scheduler.schedule(fn, priority);
+   512→   512→    }
+   513→   513→
+   514→   514→    public putConversation(conversation: ConversationToApi, priority: Priority): Promise<RemoteStatus> {
+   515→   515→        const fn = () => this.callPutJson('conversations', conversation);
+   516→   516→        return this.scheduler.schedule(fn, priority);
+   517→   517→    }
+   518→   518→
+   519→   519→    public postAsset(asset: NewAssetToApi, priority: Priority): Promise<RemoteId> {
+   520→   520→        const path = `/spaces/${asset.SpaceID}/assets`;
+   521→   521→        const fn = () => this.callPostJson('assets', asset, path);
+   522→   522→        return this.scheduler.schedule(fn, priority);
+   523→   523→    }
+   524→   524→
+   525→   525→    public postAttachment(attachmentArgs: NewAssetToApi, priority: Priority): Promise<RemoteId> {
+   526→   526→        return this.postAsset(attachmentArgs, priority);
+   527→   527→    }
+   528→   528→
+   529→   529→    public deleteSpace(id: RemoteId, priority: Priority): Promise<RemoteStatus> {
+   530→   530→        const fn = () => this.callDelete('spaces', id);
+   531→   531→        return this.scheduler.schedule(fn, priority);
+   532→   532→    }
+   533→   533→
+   534→   534→    public deleteConversation(id: RemoteId, priority: Priority): Promise<RemoteStatus> {
+   535→   535→        const fn = () => this.callDelete('conversations', id);
+   536→   536→        return this.scheduler.schedule(fn, priority);
+   537→   537→    }
+   538→   538→
+   539→   539→    public deleteMessage(id: RemoteId, priority: Priority): Promise<RemoteStatus> {
+   540→   540→        const fn = () => this.callDelete('messages', id);
+   541→   541→        return this.scheduler.schedule(fn, priority);
+   542→   542→    }
+   543→   543→
+   544→   544→    public deleteAsset(attachmentId: RemoteId, priority: Priority): Promise<RemoteStatus> {
+   545→   545→        const fn = () => this.callDelete('assets', attachmentId);
+   546→   546→        return this.scheduler.schedule(fn, priority);
+   547→   547→    }
+   548→   548→
+   549→   549→    public deleteAttachment(attachmentId: RemoteId, priority: Priority): Promise<RemoteStatus> {
+   550→   550→        return this.deleteAsset(attachmentId, priority);
+   551→   551→    }
+   552→   552→
+   553→   553→    public async listSpaces(params?: ListSpacesParams): Promise<ListSpacesRemote> {
+   554→   554→        const casedParams = params && objectToPascalCaseKeys(params);
+   555→   555→        const data = await this.callListJson('spaces', casedParams);
+   556→   556→        console.log('listSpaces: data =', data);
+   557→   557→        return convertSpacesFromApi(data.Spaces);
+   558→   558→    }
+   559→   559→
+   560→   560→    public async listSpacesPaginate(): Promise<ListSpacesRemote> {
+   561→   561→        let result: ListSpacesRemote = {
+   562→   562→            spaces: {},
+   563→   563→            conversations: {},
+   564→   564→            deletedSpaces: {},
+   565→   565→            deletedConversations: {},
+   566→   566→            assets: {},
+   567→   567→            deletedAssets: {},
+   568→   568→        };
+   569→   569→        let lastTimestamp: Date | undefined;
+   570→   570→        while (true) {
+   571→   571→            const createTimeUntil = lastTimestamp ? dateToUnixTimestamp(lastTimestamp) : undefined;
+   572→   572→            const next = await this.listSpaces({ createTimeUntil });
+   573→   573→            const newLastTimestamp = listify({ ...next.spaces, ...next.deletedSpaces })
+   574→   574→                .map((s) => new Date(s.createdAt))
+   575→   575→                .reduce(oldestDateReducer, lastTimestamp);
+   576→   576→            if (!newLastTimestamp || (lastTimestamp && newLastTimestamp >= lastTimestamp)) break;
+   577→   577→            lastTimestamp = newLastTimestamp;
+   578→   578→            result = {
+   579→   579→                spaces: { ...result.spaces, ...next.spaces },
+   580→   580→                conversations: { ...result.conversations, ...next.conversations },
+   581→   581→                deletedSpaces: { ...result.deletedSpaces, ...next.deletedSpaces },
+   582→   582→                deletedConversations: { ...result.deletedConversations, ...next.deletedConversations },
+   583→   583→                assets: { ...result.assets, ...(next.assets || {}) },
+   584→   584→                deletedAssets: { ...result.deletedAssets, ...(next.deletedAssets || {}) },
+   585→   585→            };
+   586→   586→        }
+   587→   587→        return result;
+   588→   588→    }
+   589→   589→
+   590→   590→    public async getSpace(spaceId: RemoteId): Promise<GetSpaceRemote | null> {
+   591→   591→        const data = await this.callGetJson('spaces', spaceId);
+   592→   592→        if (data === null) return null;
+   593→   593→        return convertSpaceFromApi(data.Space);
+   594→   594→    }
+   595→   595→
+   596→   596→    public async getConversation(id: RemoteId, spaceTag: SpaceTag): Promise<GetConversationRemote | null> {
+   597→   597→        const data = await this.callGetJson('conversations', id);
+   598→   598→        if (data === null) return null;
+   599→   599→        return convertConversationFromApi(data.Conversation, spaceTag);
+   600→   600→    }
+   601→   601→
+   602→   602→    public async getMessage(
+   603→   603→        id: RemoteId,
+   604→   604→        conversationTag: ConversationTag,
+   605→   605→        parentId: MessageId | undefined,
+   606→   606→        remoteConversationId: RemoteId
+   607→   607→    ): Promise<RemoteMessage | null> {
+   608→   608→        const data = await this.callGetJson('messages', id);
+   609→   609→        if (data === null) return null;
+   610→   610→        return convertMessageFromApi(data.Message, conversationTag, parentId, remoteConversationId);
+   611→   611→    }
+   612→   612→
+   613→   613→    public async getAsset(id: RemoteId, spaceTag: SpaceTag): Promise<RemoteFilledAsset | RemoteDeletedAsset | null> {
+   614→   614→        const data = await this.callGetJson('assets', id);
+   615→   615→        if (data === null) return null;
+   616→   616→        const asset = convertAssetFromApi(data.Asset, spaceTag);
+   617→   617→        if (asset.deleted) return asset;
+   618→   618→        if (!asset.encrypted) {
+   619→   619→            console.log('getAsset: remote asset does not have the `Encrypted` field set');
+   620→   620→            return null;
+   621→   621→        }
+   622→   622→        // Sorry for the weird juggling below; if I do `return asset`, TypeScript complains that `asset.encrypted`
+   623→   623→        // can be undefined, which clearly it cannot because of the `if (!asset.encrypted) return` above.
+   624→   624→        // Anyway, this is type safe: it guarantees the return type is cleanly satisfied.
+   625→   625→        return { ...asset, encrypted: asset.encrypted };
+   626→   626→    }
+   627→   627→
+   628→   628→    public getAttachment(
+   629→   629→        attachmentId: RemoteId,
+   630→   630→        spaceId: LocalId
+   631→   631→    ): Promise<RemoteFilledAttachment | RemoteDeletedAttachment | null> {
+   632→   632→        return this.getAsset(attachmentId, spaceId);
+   633→   633→    }
+   634→   634→
+   635→   635→    public async listGeneratedAssets(params?: ListGeneratedAssetsParams): Promise<GeneratedAssetFromApi[]> {
+   636→   636→        const queryParams: Record<string, string> = {};
+   637→   637→        if (params?.assetType !== undefined) {
+   638→   638→            queryParams.AssetType = String(params.assetType);
+   639→   639→        }
+   640→   640→        if (params?.createTimeSince !== undefined) {
+   641→   641→            queryParams.CreateTimeSince = String(params.createTimeSince);
+   642→   642→        }
+   643→   643→        if (params?.createTimeUntil !== undefined) {
+   644→   644→            queryParams.CreateTimeUntil = String(params.createTimeUntil);
+   645→   645→        }
+   646→   646→
+   647→   647→        let url = '/api/lumo/v1/assets/generated';
+   648→   648→        if (Object.keys(queryParams).length > 0) {
+   649→   649→            url += `?${new URLSearchParams(queryParams)}`;
+   650→   650→        }
+   651→   651→
+   652→   652→        console.log(`lumo api: http get ${url}`);
+   653→   653→        const response = await fetch(url, {
+   654→   654→            method: 'GET',
+   655→   655→            headers: this.protonHeaders(),
+   656→   656→        });
+   657→   657→
+   658→   658→        if (!response.ok) {
+   659→   659→            throw new Error(`HTTP error fetching generated assets: got ${response.status}`);
+   660→   660→        }
+   661→   661→
+   662→   662→        const json = await response.json();
+   663→   663→        return (json?.Assets ?? []) as GeneratedAssetFromApi[];
+   664→   664→    }
+   665→   665→}
+   666→   666→

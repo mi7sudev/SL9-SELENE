@@ -1,0 +1,1003 @@
+     1→import { useState } from 'react';
+     2→import type { ReactNode } from 'react';
+     3→
+     4→import { clsx } from 'clsx';
+     5→import { c } from 'ttag';
+     6→
+     7→import { BRAND_NAME } from '@proton/shared/lib/constants';
+     8→
+     9→import type { ToolCallAnnouncement, ToolCallData } from '../../../../../../lib/toolCall/types';
+    10→import { isNativeToolCallData } from '../../../../../../lib/toolCall/types';
+    11→import type { Message } from '../../../../../../types';
+    12→import { type IconName, LumoIcon } from '../../../../../LumoIcon/LumoIcon';
+    13→import { LazyProgressiveMarkdownRenderer } from '../../../../../LumoMarkdown/LazyMarkdownComponents';
+    14→import { ThinkingProgressDots } from './ThinkingProgressDots';
+    15→import { getThinkingPathHeader } from './thinkingPathLabels';
+    16→import { useThinkingHeaderAnimation } from './useThinkingHeaderAnimation';
+    17→
+    18→import './ThinkingPath.scss';
+    19→
+    20→/**
+    21→ * Get icon name for tool call type.
+    22→ */
+    23→function getToolCallIcon(toolCall: ToolCallData | ToolCallAnnouncement): IconName {
+    24→    if (isNativeToolCallData(toolCall)) {
+    25→        if (toolCall.name.startsWith('filesystem__')) {
+    26→            return 'Folder';
+    27→        }
+    28→        if (toolCall.name.startsWith('bash__')) {
+    29→            return 'Terminal';
+    30→        }
+    31→        if (toolCall.name.startsWith('browser__')) {
+    32→            return 'Globe';
+    33→        }
+    34→        if (toolCall.name.startsWith('slack__')) {
+    35→            return 'MessageSquare';
+    36→        }
+    37→        if (toolCall.name.startsWith('confluence__')) {
+    38→            return 'FileText';
+    39→        }
+    40→        return 'Wrench';
+    41→    }
+    42→
+    43→    switch (toolCall.name) {
+    44→        case 'web_search':
+    45→            return 'Globe';
+    46→        case 'weather':
+    47→            return 'Cloud';
+    48→        case 'stock':
+    49→        case 'cryptocurrency':
+    50→            return 'TrendingUp';
+    51→        case 'describe_image':
+    52→        case 'generate_image':
+    53→        case 'edit_image':
+    54→            return 'Image';
+    55→        case 'proton_info':
+    56→            return 'Shield';
+    57→        default:
+    58→            return 'Wrench';
+    59→    }
+    60→}
+    61→
+    62→/**
+    63→ * Get human-readable label for tool call with details.
+    64→ * Returns [presentTense, pastTense] tuple.
+    65→ */
+    66→function getNativeToolCallLabel(name: string, args: Record<string, unknown>): [string, string] {
+    67→    const argStr = (key: string) => (typeof args[key] === 'string' ? (args[key] as string) : '');
+    68→
+    69→    if (name === 'filesystem__fs_search') {
+    70→        const query = argStr('query') || 'files';
+    71→        return [`Searching files for "${query}"...`, `Searched files for "${query}" and sent results back`];
+    72→    }
+    73→    if (name === 'filesystem__fs_read') {
+    74→        const path = argStr('path') || 'file';
+    75→        return [`Reading ${path}...`, `Read ${path} and sent contents back`];
+    76→    }
+    77→    if (name === 'filesystem__fs_write') {
+    78→        const path = argStr('path') || 'file';
+    79→        return [`Writing ${path}...`, `Updated ${path}`];
+    80→    }
+    81→    if (name === 'filesystem__fs_edit') {
+    82→        const path = argStr('path') || 'file';
+    83→        return [`Editing ${path}...`, `Edited ${path}`];
+    84→    }
+    85→    if (name === 'bash__run') {
+    86→        const command = argStr('command') || 'command';
+    87→        const short = command.length > 60 ? `${command.slice(0, 57)}...` : command;
+    88→        return [`Running \`${short}\`...`, `Ran command and sent output back`];
+    89→    }
+    90→    if (name === 'browser__fetch' || name === 'browser__navigate') {
+    91→        const url = argStr('url') || 'page';
+    92→        return [`Fetching ${url}...`, `Fetched ${url} and sent contents back`];
+    93→    }
+    94→
+    95→    const shortName = name.includes('__') ? name.split('__').slice(1).join('__') : name;
+    96→    return [`Running ${shortName}...`, `Ran ${shortName} and sent results back`];
+    97→}
+    98→
+    99→function getToolCallLabel(toolCall: ToolCallData | ToolCallAnnouncement): [string, string] {
+   100→    if (isNativeToolCallData(toolCall)) {
+   101→        const args = 'arguments' in toolCall ? toolCall.arguments : {};
+   102→        return getNativeToolCallLabel(toolCall.name, args);
+   103→    }
+   104→
+   105→    switch (toolCall.name) {
+   106→        case 'web_search': {
+   107→            const query = toolCall.arguments?.query;
+   108→            return query
+   109→                ? [`Searching the web for "${query}"...`, `Searched the web for "${query}"`]
+   110→                : ['Searching the web...', 'Searched the web'];
+   111→        }
+   112→        case 'weather': {
+   113→            const loc = toolCall.arguments?.location;
+   114→            const location = loc ? ('city' in loc ? loc.city : `${loc.lat}, ${loc.lon}`) : undefined;
+   115→            return location
+   116→                ? [`Checking the weather in ${location}...`, `Checked the weather in ${location}`]
+   117→                : ['Checking the weather...', 'Checked the weather'];
+   118→        }
+   119→        case 'stock': {
+   120→            const symbol = toolCall.arguments?.symbol;
+   121→            return symbol
+   122→                ? [`Looking up ${symbol} stock prices...`, `Looked up ${symbol} stock prices`]
+   123→                : ['Looking up stock prices...', 'Looked up stock prices'];
+   124→        }
+   125→        case 'cryptocurrency': {
+   126→            const symbol = toolCall.arguments?.symbol;
+   127→            return symbol
+   128→                ? [`Checking ${symbol} cryptocurrency prices...`, `Checked ${symbol} cryptocurrency prices`]
+   129→                : ['Checking cryptocurrency prices...', 'Checked cryptocurrency prices'];
+   130→        }
+   131→        case 'describe_image':
+   132→            return [
+   133→                c('collider_2025:Reasoning').t`Looking at your image...`,
+   134→                c('collider_2025:Reasoning').t`Looked at your image`,
+   135→            ];
+   136→        case 'generate_image':
+   137→            return [
+   138→                c('collider_2025:Reasoning').t`Generating image...`,
+   139→                c('collider_2025:Reasoning').t`Generated image`,
+   140→            ];
+   141→        case 'edit_image':
+   142→            return [c('collider_2025:Reasoning').t`Editing image...`, c('collider_2025:Reasoning').t`Edited image`];
+   143→        case 'proton_info':
+   144→            return [
+   145→                c('collider_2025:Reasoning').t`Checking ${BRAND_NAME} knowledge...`,
+   146→                c('collider_2025:Reasoning').t`Checked ${BRAND_NAME} knowledge`,
+   147→            ];
+   148→        case 'web_extract':
+   149→            return [
+   150→                c('collider_2025:Reasoning').t`Extracting content from page...`,
+   151→                c('collider_2025:Reasoning').t`Extracted page content`,
+   152→            ];
+   153→        default:
+   154→            return [c('collider_2025:Reasoning').t`Executing tool...`, c('collider_2025:Reasoning').t`Executed tool`];
+   155→    }
+   156→}
+   157→
+   158→export type ThinkingStep =
+   159→    | { type: 'reasoning'; content: string; isActive: boolean; durationMs?: number }
+   160→    | { type: 'tool_call'; toolCall: ToolCallData | ToolCallAnnouncement; result?: string; isActive: boolean };
+   161→
+   162→interface ThinkingPathProps {
+   163→    steps: ThinkingStep[];
+   164→    message: Message;
+   165→    isThinking: boolean;
+   166→    showThinkingTrace: boolean;
+   167→    handleLinkClick?: (e: React.MouseEvent<HTMLAnchorElement>, href: string) => void;
+   168→}
+   169→
+   170→const THINKING_TRACE_LINE_COUNT = 5;
+   171→
+   172→function stripMarkdownLine(line: string): string {
+   173→    return line
+   174→        .replace(/`([^`]+)`/g, '$1')
+   175→        .replace(/^#{1,6}\s+/, '')
+   176→        .replace(/\*\*([^*]+)\*\*/g, '$1')
+   177→        .replace(/__([^_]+)__/g, '$1')
+   178→        .replace(/\*([^*\n]+)\*/g, '$1')
+   179→        .replace(/_([^_\n]+)_/g, '$1')
+   180→        .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+   181→        .replace(/^>\s?/, '')
+   182→        .replace(/^[-*+]\s+/, '')
+   183→        .replace(/^\d+\.\s+/, '')
+   184→        .trim();
+   185→}
+   186→
+   187→function reasoningContentToLines(content: string): string[] {
+   188→    if (!content.trim()) {
+   189→        return [];
+   190→    }
+   191→
+   192→    return content
+   193→        .split('\n')
+   194→        .map(stripMarkdownLine)
+   195→        .filter((line) => line.length > 0);
+   196→}
+   197→
+   198→function buildThinkingTraceLines(steps: ThinkingStep[]): string[] {
+   199→    const lines: string[] = [];
+   200→
+   201→    for (const step of steps) {
+   202→        if (step.type === 'reasoning') {
+   203→            lines.push(...reasoningContentToLines(step.content));
+   204→            continue;
+   205→        }
+   206→
+   207→        const [presentLabel, pastLabel] = getToolCallLabel(step.toolCall);
+   208→        lines.push(step.isActive ? presentLabel : pastLabel);
+   209→    }
+   210→
+   211→    const activeToolStep = [...steps]
+   212→        .reverse()
+   213→        .find(
+   214→            (step): step is Extract<ThinkingStep, { type: 'tool_call' }> => step.type === 'tool_call' && step.isActive
+   215→        );
+   216→
+   217→    if (activeToolStep) {
+   218→        const [presentLabel] = getToolCallLabel(activeToolStep.toolCall);
+   219→        if (lines.at(-1) !== presentLabel) {
+   220→            lines.push(presentLabel);
+   221→        }
+   222→    }
+   223→
+   224→    return lines;
+   225→}
+   226→
+   227→function getTraceLineOpacity(index: number, total: number): number {
+   228→    if (total <= 1) {
+   229→        return 1;
+   230→    }
+   231→
+   232→    const minOpacity = 0.2;
+   233→    return minOpacity + (index / (total - 1)) * (1 - minOpacity);
+   234→}
+   235→
+   236→const ThinkingPathTrace = ({ lines }: { lines: string[] }) => {
+   237→    const visibleLines = lines.slice(-THINKING_TRACE_LINE_COUNT);
+   238→
+   239→    if (visibleLines.length === 0) {
+   240→        return null;
+   241→    }
+   242→
+   243→    return (
+   244→        <div className="thinking-path-trace" aria-hidden="true">
+   245→            {visibleLines.map((line, index) => (
+   246→                <p
+   247→                    key={`${index}-${line.slice(-24)}`}
+   248→                    className="thinking-path-trace-line m-0 color-weak text-rg lh130"
+   249→                    style={{
+   250→                        opacity: getTraceLineOpacity(index, visibleLines.length),
+   251→                        display: '-webkit-box',
+   252→                        WebkitBoxOrient: 'vertical',
+   253→                    }}
+   254→                >
+   255→                    {line}
+   256→                </p>
+   257→            ))}
+   258→        </div>
+   259→    );
+   260→};
+   261→
+   262→function mergeConsecutiveReasoningSteps(steps: ThinkingStep[]): ThinkingStep[] {
+   263→    const merged: ThinkingStep[] = [];
+   264→
+   265→    for (const step of steps) {
+   266→        if (step.type !== 'reasoning') {
+   267→            merged.push(step);
+   268→            continue;
+   269→        }
+   270→
+   271→        const previous = merged[merged.length - 1];
+   272→        if (previous?.type === 'reasoning') {
+   273→            merged[merged.length - 1] = {
+   274→                ...previous,
+   275→                content: previous.content + step.content,
+   276→                isActive: step.isActive,
+   277→                durationMs: step.durationMs ?? previous.durationMs,
+   278→            };
+   279→            continue;
+   280→        }
+   281→
+   282→        merged.push({ ...step });
+   283→    }
+   284→
+   285→    return merged;
+   286→}
+   287→
+   288→function getReasoningStepLabel(): string {
+   289→    return c('collider_2025:Reasoning').t`Reasoning`;
+   290→}
+   291→
+   292→function getToolCallShortLabel(toolCall: ToolCallData | ToolCallAnnouncement): [string, string] {
+   293→    if (isNativeToolCallData(toolCall)) {
+   294→        if (toolCall.name === 'filesystem__fs_search') {
+   295→            return ['Searching files...', 'Searched files'];
+   296→        }
+   297→        if (toolCall.name === 'filesystem__fs_read') {
+   298→            return ['Reading file...', 'Read file'];
+   299→        }
+   300→        if (toolCall.name === 'filesystem__fs_write') {
+   301→            return ['Writing file...', 'Updated file'];
+   302→        }
+   303→        if (toolCall.name === 'filesystem__fs_edit') {
+   304→            return ['Editing file...', 'Edited file'];
+   305→        }
+   306→        if (toolCall.name === 'bash__run') {
+   307→            return ['Running command...', 'Ran command'];
+   308→        }
+   309→        if (toolCall.name === 'browser__fetch' || toolCall.name === 'browser__navigate') {
+   310→            return ['Fetching page...', 'Fetched page'];
+   311→        }
+   312→
+   313→        const shortName = toolCall.name.includes('__') ? toolCall.name.split('__').slice(1).join('__') : toolCall.name;
+   314→        return [`Running ${shortName}...`, `Ran ${shortName}`];
+   315→    }
+   316→
+   317→    switch (toolCall.name) {
+   318→        case 'web_search':
+   319→            return ['Searching the web...', 'Searched the web'];
+   320→        case 'weather':
+   321→            return ['Checking the weather...', 'Checked the weather'];
+   322→        case 'stock':
+   323→            return ['Looking up stock prices...', 'Looked up stock prices'];
+   324→        case 'cryptocurrency':
+   325→            return ['Checking cryptocurrency prices...', 'Checked cryptocurrency prices'];
+   326→        case 'describe_image':
+   327→            return [
+   328→                c('collider_2025:Reasoning').t`Looking at your image...`,
+   329→                c('collider_2025:Reasoning').t`Looked at your image`,
+   330→            ];
+   331→        case 'generate_image':
+   332→            return [
+   333→                c('collider_2025:Reasoning').t`Generating image...`,
+   334→                c('collider_2025:Reasoning').t`Generated image`,
+   335→            ];
+   336→        case 'edit_image':
+   337→            return [c('collider_2025:Reasoning').t`Editing image...`, c('collider_2025:Reasoning').t`Edited image`];
+   338→        case 'proton_info':
+   339→            return [
+   340→                c('collider_2025:Reasoning').t`Checking ${BRAND_NAME} knowledge...`,
+   341→                c('collider_2025:Reasoning').t`Checked ${BRAND_NAME} knowledge`,
+   342→            ];
+   343→        case 'web_extract':
+   344→            return [
+   345→                c('collider_2025:Reasoning').t`Extracting content from page...`,
+   346→                c('collider_2025:Reasoning').t`Extracted page content`,
+   347→            ];
+   348→        default:
+   349→            return [c('collider_2025:Reasoning').t`Executing tool...`, c('collider_2025:Reasoning').t`Executed tool`];
+   350→    }
+   351→}
+   352→
+   353→function getToolCallStateLabel(toolCall: ToolCallData | ToolCallAnnouncement, isActive: boolean): string {
+   354→    const [presentLabel, pastLabel] = getToolCallShortLabel(toolCall);
+   355→    return isActive ? presentLabel : pastLabel;
+   356→}
+   357→
+   358→function getNativeToolCallContentLines(name: string, args: Record<string, unknown>): string[] {
+   359→    const argStr = (key: string) => (typeof args[key] === 'string' ? (args[key] as string) : '');
+   360→
+   361→    if (name === 'filesystem__fs_search') {
+   362→        const query = argStr('query');
+   363→        return query ? [query] : [];
+   364→    }
+   365→    if (name === 'filesystem__fs_read' || name === 'filesystem__fs_write' || name === 'filesystem__fs_edit') {
+   366→        const path = argStr('path');
+   367→        return path ? [path] : [];
+   368→    }
+   369→    if (name === 'bash__run') {
+   370→        const command = argStr('command');
+   371→        if (!command) return [];
+   372→        return [command.length > 120 ? `${command.slice(0, 117)}...` : command];
+   373→    }
+   374→    if (name === 'browser__fetch' || name === 'browser__navigate') {
+   375→        const url = argStr('url');
+   376→        return url ? [url] : [];
+   377→    }
+   378→
+   379→    return [];
+   380→}
+   381→
+   382→const ThinkingStepTrack = ({ children }: { children: ReactNode }) => (
+   383→    <div className="thinking-step-track flex flex-nowrap justify-center items-start">{children}</div>
+   384→);
+   385→
+   386→const ThinkingStepLabel = ({ children, isActive }: { children: ReactNode; isActive?: boolean }) => (
+   387→    <p className={clsx('thinking-step-label m-0 text-rg lh130', isActive ? 'color-norm' : 'color-weak')}>{children}</p>
+   388→);
+   389→
+   390→const ThinkingStepBodyLines = ({ lines }: { lines: string[] }) => {
+   391→    if (lines.length === 0) {
+   392→        return null;
+   393→    }
+   394→
+   395→    return (
+   396→        <div className="thinking-step-body flex flex-column gap-0.5 min-w-0">
+   397→            {lines.map((line, index) => (
+   398→                <p key={`${index}-${line.slice(-24)}`} className="thinking-step-body-line m-0 color-weak text-rg lh130">
+   399→                    {line}
+   400→                </p>
+   401→            ))}
+   402→        </div>
+   403→    );
+   404→};
+   405→
+   406→const ReasoningContent = ({
+   407→    content,
+   408→    isActive,
+   409→    message,
+   410→    handleLinkClick,
+   411→}: {
+   412→    content: string;
+   413→    isActive: boolean;
+   414→    message: Message;
+   415→    handleLinkClick?: (e: React.MouseEvent<HTMLAnchorElement>, href: string) => void;
+   416→}) => {
+   417→    if (!content.trim()) {
+   418→        return null;
+   419→    }
+   420→
+   421→    return (
+   422→        <div className="thinking-step">
+   423→            <ThinkingStepTrack>
+   424→                <LumoIcon
+   425→                    name="Lightbulb"
+   426→                    width={16}
+   427→                    height={16}
+   428→                    className={clsx(
+   429→                        'thinking-step-icon-badge shrink-0',
+   430→                        isActive && 'thinking-step-icon-badge--active'
+   431→                    )}
+   432→                />
+   433→            </ThinkingStepTrack>
+   434→
+   435→            <div className="thinking-step-content thinking-step-content--reasoning min-w-0 text-rg lh130">
+   436→                <ThinkingStepLabel isActive={isActive}>{getReasoningStepLabel()}</ThinkingStepLabel>
+   437→                <div className="thinking-step-body min-w-0">
+   438→                    <LazyProgressiveMarkdownRenderer
+   439→                        content={content}
+   440→                        isStreaming={isActive}
+   441→                        handleLinkClick={handleLinkClick}
+   442→                        message={message}
+   443→                    />
+   444→                </div>
+   445→            </div>
+   446→        </div>
+   447→    );
+   448→};
+   449→
+   450→const DoneStep = () => (
+   451→    <div className="thinking-step">
+   452→        <ThinkingStepTrack>
+   453→            <LumoIcon
+   454→                name="Check"
+   455→                width={16}
+   456→                height={16}
+   457→                className="thinking-step-icon-badge thinking-step-icon-badge--done shrink-0"
+   458→            />
+   459→        </ThinkingStepTrack>
+   460→
+   461→        <div className="thinking-step-content min-w-0 text-rg lh130">
+   462→            <span className="color-hint">{c('collider_2025:Reasoning').t`Done`}</span>
+   463→        </div>
+   464→    </div>
+   465→);
+   466→
+   467→interface WebSearchResult {
+   468→    title: string;
+   469→    url: string;
+   470→    description: string;
+   471→    snippets?: string[];
+   472→    ref?: number;
+   473→}
+   474→
+   475→interface WebSearchResults {
+   476→    results: WebSearchResult[];
+   477→    total_count?: number;
+   478→}
+   479→
+   480→interface ImageToolResult {
+   481→    status: string;
+   482→    info?: string;
+   483→    elapsed_ms?: number;
+   484→    seed?: number | null;
+   485→    tool?: string;
+   486→    error?: boolean;
+   487→}
+   488→
+   489→interface WebExtractResultItem {
+   490→    title: string;
+   491→    url: string;
+   492→    content: string;
+   493→}
+   494→
+   495→interface WebExtractFailedUrl {
+   496→    url: string;
+   497→    error?: string;
+   498→}
+   499→
+   500→interface WebExtractResult {
+   501→    type: 'WebExtract' | string;
+   502→    results: WebExtractResultItem[];
+   503→    failedUrls: WebExtractFailedUrl[];
+   504→}
+   505→
+   506→const normalizeWebExtractFailedUrl = (item: unknown): WebExtractFailedUrl | null => {
+   507→    if (typeof item === 'string') {
+   508→        return { url: item };
+   509→    }
+   510→
+   511→    if (typeof item === 'object' && item !== null && 'url' in item) {
+   512→        const failedItem = item as { url: unknown; error?: unknown };
+   513→
+   514→        if (typeof failedItem.url !== 'string') {
+   515→            return null;
+   516→        }
+   517→
+   518→        return {
+   519→            url: failedItem.url,
+   520→            error: typeof failedItem.error === 'string' ? failedItem.error : undefined,
+   521→        };
+   522→    }
+   523→
+   524→    return null;
+   525→};
+   526→
+   527→const parseWebExtractResult = (result: string): WebExtractResult | null => {
+   528→    try {
+   529→        const parsed = JSON.parse(result) as {
+   530→            type?: string;
+   531→            results?: WebExtractResultItem[];
+   532→            failed_urls?: unknown[];
+   533→        };
+   534→
+   535→        if (parsed.type === 'WebExtract' && Array.isArray(parsed.results)) {
+   536→            const failedUrls = Array.isArray(parsed.failed_urls)
+   537→                ? parsed.failed_urls
+   538→                      .map(normalizeWebExtractFailedUrl)
+   539→                      .filter((failedUrl): failedUrl is WebExtractFailedUrl => failedUrl !== null)
+   540→                : [];
+   541→
+   542→            return {
+   543→                type: parsed.type,
+   544→                results: parsed.results,
+   545→                failedUrls,
+   546→            };
+   547→        }
+   548→    } catch {
+   549→        // Not valid JSON or not web extract format
+   550→    }
+   551→    return null;
+   552→};
+   553→
+   554→const parseWebSearchResults = (result: string): WebSearchResults | null => {
+   555→    try {
+   556→        const parsed = JSON.parse(result);
+   557→        if (parsed.results && Array.isArray(parsed.results)) {
+   558→            return parsed as WebSearchResults;
+   559→        }
+   560→    } catch {
+   561→        // Not valid JSON or not web search format
+   562→    }
+   563→    return null;
+   564→};
+   565→
+   566→const parseImageToolResult = (result: string): ImageToolResult | null => {
+   567→    try {
+   568→        const parsed = JSON.parse(result);
+   569→        if (parsed.status && parsed.tool) {
+   570→            return parsed as ImageToolResult;
+   571→        }
+   572→    } catch {
+   573→        // Not valid JSON or not image tool format
+   574→    }
+   575→    return null;
+   576→};
+   577→
+   578→function getToolCallContentLines(toolCall: ToolCallData | ToolCallAnnouncement, result?: string): string[] {
+   579→    if (isNativeToolCallData(toolCall)) {
+   580→        const args = 'arguments' in toolCall ? toolCall.arguments : {};
+   581→        return getNativeToolCallContentLines(toolCall.name, args);
+   582→    }
+   583→
+   584→    const lines: string[] = [];
+   585→
+   586→    if (toolCall.name === 'web_search') {
+   587→        const query = toolCall.arguments?.query;
+   588→        if (typeof query === 'string' && query.trim()) {
+   589→            lines.push(query.trim());
+   590→        }
+   591→        if (result) {
+   592→            const webSearchResults = parseWebSearchResults(result);
+   593→            webSearchResults?.results.forEach((searchResult) => {
+   594→                lines.push(searchResult.url);
+   595→            });
+   596→        }
+   597→        return lines;
+   598→    }
+   599→
+   600→    if (toolCall.name === 'web_extract' && result) {
+   601→        const webExtractResult = parseWebExtractResult(result);
+   602→        webExtractResult?.results.forEach((item) => lines.push(item.url));
+   603→        webExtractResult?.failedUrls.forEach((failedUrl) => lines.push(failedUrl.url));
+   604→        return lines;
+   605→    }
+   606→
+   607→    if (toolCall.name === 'weather') {
+   608→        const loc = toolCall.arguments?.location;
+   609→        const location = loc ? ('city' in loc ? loc.city : `${loc.lat}, ${loc.lon}`) : undefined;
+   610→        return location ? [location] : [];
+   611→    }
+   612→
+   613→    if (toolCall.name === 'stock' || toolCall.name === 'cryptocurrency') {
+   614→        const symbol = toolCall.arguments?.symbol;
+   615→        return typeof symbol === 'string' && symbol.trim() ? [symbol.trim()] : [];
+   616→    }
+   617→
+   618→    return lines;
+   619→}
+   620→
+   621→const toolStepToggleClassName =
+   622→    'thinking-step-toggle flex flex-nowrap items-center justify-space-between gap-2 w-full p-0 m-0 rounded border-none text-left bg-transparent hover:bg-weak color-weak text-rg lh130';
+   623→
+   624→const ToolCallStep = ({
+   625→    toolCall,
+   626→    result,
+   627→    isActive,
+   628→    message,
+   629→    handleLinkClick,
+   630→}: {
+   631→    toolCall: ToolCallData | ToolCallAnnouncement;
+   632→    result?: string;
+   633→    isActive: boolean;
+   634→    message: Message;
+   635→    handleLinkClick?: (e: React.MouseEvent<HTMLAnchorElement>, href: string) => void;
+   636→}) => {
+   637→    const [isExpanded, setIsExpanded] = useState(false);
+   638→    const stateLabel = getToolCallStateLabel(toolCall, isActive);
+   639→    const contentLines = getToolCallContentLines(toolCall, result);
+   640→    const iconName = getToolCallIcon(toolCall);
+   641→
+   642→    const hasDetails = result && result.trim().length > 0;
+   643→    const webSearchResults = hasDetails && toolCall.name === 'web_search' ? parseWebSearchResults(result) : null;
+   644→    const imageToolResult =
+   645→        hasDetails &&
+   646→        (toolCall.name === 'describe_image' || toolCall.name === 'generate_image' || toolCall.name === 'edit_image')
+   647→            ? parseImageToolResult(result)
+   648→            : null;
+   649→    const webExtractResult = hasDetails && toolCall.name === 'web_extract' ? parseWebExtractResult(result) : null;
+   650→    const hasInlineCard =
+   651→        hasDetails &&
+   652→        (toolCall.name === 'stock' ||
+   653→            toolCall.name === 'cryptocurrency' ||
+   654→            toolCall.name === 'weather' ||
+   655→            toolCall.name === 'proton_info');
+   656→    const isNativeDesktopTool = isNativeToolCallData(toolCall);
+   657→    const showNativeComplete = isNativeDesktopTool && !isActive && hasDetails;
+   658→
+   659→    const hasInlineImageStatus = imageToolResult !== null && !isActive;
+   660→    const hasError = imageToolResult?.error === true;
+   661→
+   662→    return (
+   663→        <div className="thinking-step">
+   664→            <ThinkingStepTrack>
+   665→                <LumoIcon
+   666→                    name={iconName}
+   667→                    width={16}
+   668→                    height={16}
+   669→                    className={clsx(
+   670→                        'thinking-step-icon-badge shrink-0',
+   671→                        isActive && 'thinking-step-icon-badge--active',
+   672→                        hasError && 'thinking-step-icon-badge--error'
+   673→                    )}
+   674→                />
+   675→            </ThinkingStepTrack>
+   676→
+   677→            <div className="thinking-step-content min-w-0 text-rg lh130">
+   678→                {hasInlineCard && !isActive ? (
+   679→                    <>
+   680→                        <ThinkingStepLabel isActive={isActive}>{stateLabel}</ThinkingStepLabel>
+   681→                        <ThinkingStepBodyLines lines={contentLines} />
+   682→                        <div className={clsx(toolStepToggleClassName, 'cursor-default mt-1')}>
+   683→                            <span className="text-sm color-weak">{c('collider_2025:Reasoning').t`Complete`}</span>
+   684→                            <LumoIcon
+   685→                                name="Check"
+   686→                                width={12}
+   687→                                height={12}
+   688→                                className="thinking-step-complete-check shrink-0"
+   689→                            />
+   690→                        </div>
+   691→                    </>
+   692→                ) : hasInlineImageStatus ? (
+   693→                    <>
+   694→                        <ThinkingStepLabel isActive={isActive}>{stateLabel}</ThinkingStepLabel>
+   695→                        <ThinkingStepBodyLines lines={contentLines} />
+   696→                        <div className={clsx(toolStepToggleClassName, 'cursor-default mt-1')}>
+   697→                            <span className={hasError ? 'color-danger text-sm' : 'text-sm color-weak'}>
+   698→                                {hasError
+   699→                                    ? c('collider_2025:Reasoning').t`Failed`
+   700→                                    : c('collider_2025:Reasoning').t`Complete`}
+   701→                            </span>
+   702→                            <div className="flex items-center gap-2 shrink-0">
+   703→                                {imageToolResult!.elapsed_ms !== undefined && (
+   704→                                    <span className="text-sm color-weak">
+   705→                                        ({(imageToolResult!.elapsed_ms / 1000).toFixed(1)}s)
+   706→                                    </span>
+   707→                                )}
+   708→                                {hasError ? (
+   709→                                    <LumoIcon name="CircleAlert" width={12} height={12} className="color-danger" />
+   710→                                ) : (
+   711→                                    <LumoIcon
+   712→                                        name="Check"
+   713→                                        width={12}
+   714→                                        height={12}
+   715→                                        className="thinking-step-complete-check"
+   716→                                    />
+   717→                                )}
+   718→                            </div>
+   719→                        </div>
+   720→                    </>
+   721→                ) : showNativeComplete ? (
+   722→                    <>
+   723→                        <ThinkingStepLabel isActive={isActive}>{stateLabel}</ThinkingStepLabel>
+   724→                        <ThinkingStepBodyLines lines={contentLines} />
+   725→                        {isExpanded && (
+   726→                            <div className="thinking-step-details mt-2 text-rg lh130">
+   727→                                <pre className="text-sm m-0 whitespace-pre-wrap">{result}</pre>
+   728→                            </div>
+   729→                        )}
+   730→                        {!isExpanded && (
+   731→                            <button
+   732→                                className={clsx(toolStepToggleClassName, 'cursor-pointer mt-1')}
+   733→                                onClick={() => setIsExpanded(true)}
+   734→                                type="button"
+   735→                            >
+   736→                                <span className="text-sm color-weak">View tool result</span>
+   737→                                <LumoIcon name="ChevronDown" width={12} height={12} />
+   738→                            </button>
+   739→                        )}
+   740→                    </>
+   741→                ) : hasDetails ? (
+   742→                    <>
+   743→                        <ThinkingStepLabel isActive={isActive}>{stateLabel}</ThinkingStepLabel>
+   744→                        {!isExpanded && <ThinkingStepBodyLines lines={contentLines} />}
+   745→                        <button
+   746→                            className={clsx(toolStepToggleClassName, 'cursor-pointer', !isExpanded && 'mt-1')}
+   747→                            onClick={() => setIsExpanded(!isExpanded)}
+   748→                            type="button"
+   749→                            aria-expanded={isExpanded}
+   750→                        >
+   751→                            <span className="text-sm color-weak">
+   752→                                {isExpanded
+   753→                                    ? c('collider_2025:Reasoning').t`Hide details`
+   754→                                    : c('collider_2025:Reasoning').t`View details`}
+   755→                            </span>
+   756→                            <div className="flex items-center gap-2 shrink-0">
+   757→                                {hasError && (
+   758→                                    <span className="flex items-center gap-1 text-sm color-danger">
+   759→                                        <LumoIcon name="CircleAlert" width={12} height={12} />
+   760→                                        Failed
+   761→                                    </span>
+   762→                                )}
+   763→                                {webSearchResults && webSearchResults.results.length > 0 && (
+   764→                                    <span className="text-sm color-weak">
+   765→                                        {webSearchResults.results.length}{' '}
+   766→                                        {webSearchResults.results.length === 1 ? 'result' : 'results'}
+   767→                                    </span>
+   768→                                )}
+   769→                                {webExtractResult && (
+   770→                                    <span className="text-sm color-weak">
+   771→                                        {webExtractResult.results.length + webExtractResult.failedUrls.length}{' '}
+   772→                                        {webExtractResult.results.length + webExtractResult.failedUrls.length === 1
+   773→                                            ? 'URL'
+   774→                                            : 'URLs'}
+   775→                                        {webExtractResult.failedUrls.length > 0 && (
+   776→                                            <span className="color-danger ml-1">
+   777→                                                · {webExtractResult.failedUrls.length} failed
+   778→                                            </span>
+   779→                                        )}
+   780→                                    </span>
+   781→                                )}
+   782→                                <LumoIcon
+   783→                                    name="ChevronDown"
+   784→                                    width={12}
+   785→                                    height={12}
+   786→                                    className={clsx(
+   787→                                        'thinking-step-chevron',
+   788→                                        isExpanded && 'thinking-step-chevron--expanded'
+   789→                                    )}
+   790→                                />
+   791→                            </div>
+   792→                        </button>
+   793→
+   794→                        {isExpanded && (
+   795→                            <div className="thinking-step-details mt-2 text-rg lh130">
+   796→                                {}
+   797→                                {webExtractResult ? (
+   798→                                    <div className="flex flex-column gap-2">
+   799→                                        {webExtractResult.results.map((item, idx) => (
+   800→                                            <div key={idx} className="pb-2 last:pb-0 flex items-start gap-2">
+   801→                                                <LumoIcon
+   802→                                                    name="CircleCheck"
+   803→                                                    width={12}
+   804→                                                    height={12}
+   805→                                                    className="color-success shrink-0 mt-0.5"
+   806→                                                />
+   807→                                                <div className="min-w-0">
+   808→                                                    <a
+   809→                                                        href={item.url}
+   810→                                                        target="_blank"
+   811→                                                        rel="noopener noreferrer"
+   812→                                                        className="text-semibold color-primary text-no-decoration hover:underline block mb-0.5"
+   813→                                                        onClick={(e) => handleLinkClick?.(e, item.url)}
+   814→                                                    >
+   815→                                                        {item.title || new URL(item.url).hostname}
+   816→                                                    </a>
+   817→                                                    <p className="text-xs color-weak m-0">
+   818→                                                        {new URL(item.url).hostname}
+   819→                                                    </p>
+   820→                                                </div>
+   821→                                            </div>
+   822→                                        ))}
+   823→                                        {webExtractResult.failedUrls.map((failedUrl, idx) => (
+   824→                                            <div
+   825→                                                key={`failed-${idx}`}
+   826→                                                className="pb-2 border-bottom border-weak last:border-0 last:pb-0 flex items-start gap-2"
+   827→                                            >
+   828→                                                <LumoIcon
+   829→                                                    name="CircleAlert"
+   830→                                                    width={12}
+   831→                                                    height={12}
+   832→                                                    className="color-danger shrink-0 mt-0.5"
+   833→                                                />
+   834→                                                <div className="min-w-0">
+   835→                                                    <p className="text-semibold color-danger m-0 mb-0.5 text-ellipsis overflow-hidden">
+   836→                                                        {failedUrl.url}
+   837→                                                    </p>
+   838→                                                    <p className="text-xs color-weak m-0">
+   839→                                                        {failedUrl.error ??
+   840→                                                            c('collider_2025: Web Extract').t`Failed to extract`}
+   841→                                                    </p>
+   842→                                                </div>
+   843→                                            </div>
+   844→                                        ))}
+   845→                                    </div>
+   846→                                ) : webSearchResults ? (
+   847→                                    <div className="flex flex-column gap-2">
+   848→                                        {webSearchResults.results.map((searchResult, idx) => (
+   849→                                            <div
+   850→                                                key={idx}
+   851→                                                className="pb-2 border-bottom border-weak last:border-0 last:pb-0"
+   852→                                            >
+   853→                                                <a
+   854→                                                    href={searchResult.url}
+   855→                                                    target="_blank"
+   856→                                                    rel="noopener noreferrer"
+   857→                                                    className="text-semibold color-primary text-no-decoration hover:underline block mb-1"
+   858→                                                    onClick={(e) => handleLinkClick?.(e, searchResult.url)}
+   859→                                                >
+   860→                                                    {searchResult.title}
+   861→                                                </a>
+   862→                                                <p className="text-sm color-weak m-0 text-ellipsis-two-lines">
+   863→                                                    {searchResult.description}
+   864→                                                </p>
+   865→                                                <p className="text-xs color-weak m-0 mt-1">
+   866→                                                    {new URL(searchResult.url).hostname}
+   867→                                                </p>
+   868→                                            </div>
+   869→                                        ))}
+   870→                                    </div>
+   871→                                ) : imageToolResult?.info ? (
+   872→                                    <div>
+   873→                                        <div className="mb-2 text-sm">
+   874→                                            <span
+   875→                                                className={clsx(
+   876→                                                    'text-semibold',
+   877→                                                    imageToolResult.status === 'success'
+   878→                                                        ? 'color-success'
+   879→                                                        : 'color-danger'
+   880→                                                )}
+   881→                                            >
+   882→                                                {imageToolResult.status === 'success' ? 'Success' : 'Failed'}
+   883→                                            </span>
+   884→                                            {imageToolResult.elapsed_ms && (
+   885→                                                <span className="color-weak ml-2">
+   886→                                                    ({(imageToolResult.elapsed_ms / 1000).toFixed(1)}s)
+   887→                                                </span>
+   888→                                            )}
+   889→                                        </div>
+   890→                                        <LazyProgressiveMarkdownRenderer
+   891→                                            content={imageToolResult.info}
+   892→                                            isStreaming={false}
+   893→                                            handleLinkClick={handleLinkClick}
+   894→                                            message={message}
+   895→                                        />
+   896→                                    </div>
+   897→                                ) : (
+   898→                                    <pre className="text-sm m-0 whitespace-pre-wrap">{result}</pre>
+   899→                                )}
+   900→                            </div>
+   901→                        )}
+   902→                    </>
+   903→                ) : (
+   904→                    <>
+   905→                        <ThinkingStepLabel isActive={isActive}>{stateLabel}</ThinkingStepLabel>
+   906→                        <ThinkingStepBodyLines lines={contentLines} />
+   907→                    </>
+   908→                )}
+   909→            </div>
+   910→        </div>
+   911→    );
+   912→};
+   913→
+   914→export const ThinkingPath = ({ steps, message, isThinking, showThinkingTrace, handleLinkClick }: ThinkingPathProps) => {
+   915→    const displaySteps = mergeConsecutiveReasoningSteps(steps);
+   916→    const [isExpanded, setIsExpanded] = useState(false);
+   917→    const isWaitingForSteps = displaySteps.length === 0 && isThinking;
+   918→
+   919→    const activeHeader = getThinkingPathHeader(displaySteps, message.id, true);
+   920→    const completeHeader = getThinkingPathHeader(displaySteps, message.id, false);
+   921→    const animatedHeader = useThinkingHeaderAnimation(
+   922→        isThinking,
+   923→        message.id,
+   924→        isWaitingForSteps ? undefined : activeHeader
+   925→    );
+   926→
+   927→    if (displaySteps.length === 0 && !isThinking) {
+   928→        return null;
+   929→    }
+   930→
+   931→    const showDone = !isThinking;
+   932→    const headerLabel = isThinking ? animatedHeader || activeHeader : completeHeader;
+   933→    const traceLines = buildThinkingTraceLines(displaySteps);
+   934→    const showTrace = !isExpanded && showThinkingTrace && traceLines.length > 0;
+   935→
+   936→    return (
+   937→        <div className="thinking-path">
+   938→            <button
+   939→                className={clsx(
+   940→                    'thinking-path-header w-full rounded border-none cursor-pointer text-left bg-transparent hover:bg-weak color-weak text-rg lh130',
+   941→                    isThinking && 'color-norm'
+   942→                )}
+   943→                onClick={() => setIsExpanded(!isExpanded)}
+   944→                type="button"
+   945→                aria-expanded={isExpanded}
+   946→                aria-busy={isThinking}
+   947→            >
+   948→                <span className="inline-flex flex-nowrap items-center min-w-0 text-ellipsis flex-1">
+   949→                    <span className={clsx(isThinking && 'text-tabular-nums')}>{headerLabel}</span>
+   950→                    {isThinking && <ThinkingProgressDots />}
+   951→                </span>
+   952→                <LumoIcon
+   953→                    name="ChevronDown"
+   954→                    width={12}
+   955→                    height={12}
+   956→                    className={clsx(
+   957→                        'thinking-path-header-chevron shrink-0 color-weak',
+   958→                        isExpanded && 'thinking-path-header-chevron--expanded',
+   959→                        isWaitingForSteps && 'visibility-hidden'
+   960→                    )}
+   961→                />
+   962→            </button>
+   963→
+   964→            {showTrace && <ThinkingPathTrace lines={traceLines} />}
+   965→
+   966→            {isExpanded && !isWaitingForSteps && (
+   967→                <div className="thinking-path-steps flex flex-nowrap flex-column gap-4 mt-2">
+   968→                    {displaySteps.map((step, idx) => {
+   969→                        if (step.type === 'reasoning') {
+   970→                            if (!step.content.trim()) {
+   971→                                return null;
+   972→                            }
+   973→
+   974→                            return (
+   975→                                <ReasoningContent
+   976→                                    key={`reasoning-${idx}-${step.isActive}`}
+   977→                                    content={step.content}
+   978→                                    isActive={step.isActive}
+   979→                                    message={message}
+   980→                                    handleLinkClick={handleLinkClick}
+   981→                                />
+   982→                            );
+   983→                        }
+   984→
+   985→                        return (
+   986→                            <ToolCallStep
+   987→                                key={idx}
+   988→                                toolCall={step.toolCall}
+   989→                                result={step.result}
+   990→                                isActive={step.isActive}
+   991→                                message={message}
+   992→                                handleLinkClick={handleLinkClick}
+   993→                            />
+   994→                        );
+   995→                    })}
+   996→
+   997→                    {showDone && <DoneStep />}
+   998→                </div>
+   999→            )}
+  1000→        </div>
+  1001→    );
+  1002→};
+  1003→

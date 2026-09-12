@@ -1,0 +1,685 @@
+     1→import type { SagaIterator } from 'redux-saga';
+     2→import { call, delay, getContext, put, select, take } from 'redux-saga/effects';
+     3→
+     4→import { MAX_SPACES_PER_USER } from '../../constants/limits';
+     5→import { base64ToMasterKey } from '../../crypto';
+     6→import type { AesKwCryptoKey } from '../../crypto/types';
+     7→import type { DbApi } from '../../indexedDb/db';
+     8→import type { LumoApi, RemoteStatus } from '../../remote/api';
+     9→import { convertNewSpaceToApi, convertSpaceToApi } from '../../remote/conversion';
+    10→import type { Priority } from '../../remote/scheduler';
+    11→import type {
+    12→    GetSpaceRemote,
+    13→    IdMapEntry,
+    14→    ListSpacesRemote,
+    15→    LocalId,
+    16→    PullSpacesRemote,
+    17→    RemoteDeletedSpace,
+    18→    RemoteId,
+    19→    RemoteSpace,
+    20→    ResourceType,
+    21→} from '../../remote/types';
+    22→import { deserializeSpace, serializeSpace } from '../../serialization';
+    23→import { removeIndexedContentForSpace } from '../../services/removeIndexedContentForSpace';
+    24→import {
+    25→    buildProjectKnowledgeSnapshot,
+    26→    buildProjectKnowledgeSnapshots,
+    27→} from '../../services/reconcileProjectSearchIndex';
+    28→import { SearchService } from '../../services/search/searchService';
+    29→import { type SerializedSpace, type Space, type SpaceId, cleanSerializedSpace, cleanSpace } from '../../types';
+    30→import type { Project } from '../../services/reconcileProjectSearchIndex';
+    31→import { listify, mapIds, mapify } from '../../util/collections';
+    32→import { isoToUnixTimestamp } from '../../util/date';
+    33→import {
+    34→    selectAttachmentsBySpaceId,
+    35→    selectConversationsBySpaceId,
+    36→    selectMessagesBySpaceId,
+    37→    selectRemoteIdFromLocal,
+    38→    selectSpaceById,
+    39→} from '../selectors';
+    40→import {
+    41→    type AttachmentMap,
+    42→    deleteAllAttachments,
+    43→    deleteAttachment,
+    44→    locallyDeleteAttachmentFromRemoteRequest,
+    45→    locallyRefreshShallowAttachmentFromRemoteRequest,
+    46→} from '../slices/core/attachments';
+    47→import {
+    48→    type ConversationMap,
+    49→    deleteAllConversations,
+    50→    deleteConversation,
+    51→    locallyDeleteConversationFromRemoteRequest,
+    52→    locallyRefreshConversationFromRemoteRequest,
+    53→} from '../slices/core/conversations';
+    54→import { addIdMapEntry, deleteAllIdMaps } from '../slices/core/idmap';
+    55→import { type MessageMap, deleteAllMessages, deleteMessage } from '../slices/core/messages';
+    56→import {
+    57→    type PullSpaceRequest,
+    58→    type PushSpaceRequest,
+    59→    type PushSpaceSuccess,
+    60→    addSpace,
+    61→    deleteAllSpaces,
+    62→    deleteAllSpacesFailure,
+    63→    deleteAllSpacesSuccess,
+    64→    deleteSpace,
+    65→    locallyDeleteSpaceFromRemoteRequest,
+    66→    locallyRefreshSpaceFromRemoteRequest,
+    67→    pullSpaceFailure,
+    68→    pullSpaceSuccess,
+    69→    pullSpacesFailure,
+    70→    pullSpacesPageResponse,
+    71→    pullSpacesRequest,
+    72→    pullSpacesSuccess,
+    73→    pushSpaceFailure,
+    74→    pushSpaceNeedsRetry,
+    75→    pushSpaceNoop,
+    76→    pushSpaceRequest,
+    77→    pushSpaceSuccess,
+    78→} from '../slices/core/spaces';
+    79→import { updateLumoUserSettingsWithAutoSave } from '../slices/lumoUserSettings';
+    80→import { addResourceLimitError } from '../slices/meta/errors';
+    81→import type { LumoState } from '../store';
+    82→import { waitForMasterKey } from './masterKey';
+    83→import { RETRY_PUSH_EVERY_MS, callWithRetry, isClientError, isLimitReachedError } from './sagaErrors';
+    84→
+    85→/*** helpers ***/
+    86→export function* saveDirtySpace(serializedSpace: SerializedSpace): SagaIterator {
+    87→    console.log('Saga triggered: saveDirtySpace', serializedSpace);
+    88→
+    89→    // Check if this space is associated with ghost conversations - if so, skip saving to IndexedDB
+    90→    const conversations: ConversationMap = yield select(selectConversationsBySpaceId(serializedSpace.id));
+    91→    const isGhostSpace = Object.values(conversations).some((conversation) => conversation.ghost);
+    92→    if (isGhostSpace) {
+    93→        console.log('saveDirtySpace: Space contains ghost conversations, skipping IndexedDB persistence');
+    94→        return;
+    95→    }
+    96→
+    97→    const dbApi: DbApi = yield getContext('dbApi');
+    98→    yield call([dbApi, dbApi.updateSpace], serializedSpace, {
+    99→        dirty: true,
+   100→    });
+   101→}
+   102→
+   103→export function* clearDirtyIfUnchanged(serializedSpace: SerializedSpace): SagaIterator<boolean> {
+   104→    console.log('Saga triggered: clearDirtyIfUnchanged', serializedSpace);
+   105→    const dbApi: DbApi = yield getContext('dbApi');
+   106→    return yield call([dbApi, dbApi.markSpaceAsSynced], serializedSpace);
+   107→}
+   108→
+   109→export function* deleteSpaceCascadeInRedux(spaceId: SpaceId): SagaIterator<any> {
+   110→    const conversations: ConversationMap = yield select(selectConversationsBySpaceId(spaceId));
+   111→    const messages: MessageMap = yield select(selectMessagesBySpaceId(spaceId));
+   112→    const attachments: AttachmentMap = yield select(selectAttachmentsBySpaceId(spaceId));
+   113→    for (const conversationId of mapIds(conversations)) {
+   114→        yield put(deleteConversation(conversationId));
+   115→    }
+   116→    for (const messageId of mapIds(messages)) {
+   117→        yield put(deleteMessage(messageId));
+   118→    }
+   119→    for (const attachmentId of mapIds(attachments)) {
+   120→        yield put(deleteAttachment(attachmentId));
+   121→    }
+   122→    yield put(deleteSpace(spaceId));
+   123→}
+   124→
+   125→export function* softDeleteSpaceFromRemote({ payload: localId }: { payload: SpaceId }): SagaIterator<any> {
+   126→    console.log('Saga triggered: softDeleteSpaceFromRemote', localId);
+   127→    const dbApi: DbApi = yield getContext('dbApi');
+   128→    const userId: string | undefined = yield select((state: LumoState) => state.user?.value?.ID);
+   129→    // IDB cascade first, then Redux cascade. Otherwise a failing IDB write would
+   130→    // leave Redux purged while IDB still holds the old data — on reload the state
+   131→    // would reappear as a stale tombstone. deleteSpaceCascadeInRedux reads from
+   132→    // Redux selectors, so running it after the IDB cascade is still correct.
+   133→    yield call([dbApi, dbApi.softDeleteSpaceCascade], localId, { dirty: false });
+   134→    try {
+   135→        yield call(removeIndexedContentForSpace, localId, userId);
+   136→    } catch (error) {
+   137→        console.log('softDeleteSpaceFromRemote: failed to remove indexed content, continuing with deletion', error);
+   138→    }
+   139→    yield call(deleteSpaceCascadeInRedux, localId);
+   140→}
+   141→
+   142→export function* softDeleteSpaceFromLocal({ payload: localId }: { payload: SpaceId }): SagaIterator<any> {
+   143→    console.log('Saga triggered: softDeleteSpaceFromLocal', localId);
+   144→    const dbApi: DbApi = yield getContext('dbApi');
+   145→    const userId: string | undefined = yield select((state: LumoState) => state.user?.value?.ID);
+   146→    // IDB cascade first, then Redux cascade — see softDeleteSpaceFromRemote.
+   147→    yield call([dbApi, dbApi.softDeleteSpaceCascade], localId, { dirty: true });
+   148→    try {
+   149→        yield call(removeIndexedContentForSpace, localId, userId);
+   150→    } catch (error) {
+   151→        console.log('softDeleteSpaceFromLocal: failed to remove indexed content, continuing with deletion', error);
+   152→    }
+   153→    yield call(deleteSpaceCascadeInRedux, localId);
+   154→    yield put(pushSpaceRequest({ id: localId, priority: 'urgent' }));
+   155→}
+   156→
+   157→export function* serializeSpaceSaga(space: Space): SagaIterator<SerializedSpace> {
+   158→    const { id: localId } = space;
+   159→    const masterKeyBase64 = yield call(waitForMasterKey, `serializeSpaceSaga ${localId}`);
+   160→    const masterKey: AesKwCryptoKey = yield call(base64ToMasterKey, masterKeyBase64);
+   161→    const serializedSpace: SerializedSpace | undefined = yield call(serializeSpace, space, masterKey);
+   162→    if (!serializedSpace) {
+   163→        throw new Error(`serializeRemoteSpace ${localId}: cannot serialize space ${localId} from remote`);
+   164→    }
+   165→    return cleanSerializedSpace(serializedSpace);
+   166→}
+   167→
+   168→export function* deserializeSpaceSaga(serializedSpace: SerializedSpace): SagaIterator<Space> {
+   169→    const { id: localId } = serializedSpace;
+   170→
+   171→    const masterKeyBase64 = yield call(waitForMasterKey, `deserializeSpaceSaga ${localId}`);
+   172→    const masterKey: AesKwCryptoKey = yield call(base64ToMasterKey, masterKeyBase64);
+   173→    const deserializedSpace: Space | null = yield call(deserializeSpace, serializedSpace, masterKey);
+   174→    if (!deserializedSpace) {
+   175→        throw new Error(`deserializeRemoteSpace ${localId}: cannot deserialize space ${localId} from remote`);
+   176→    }
+   177→    return cleanSpace(deserializedSpace);
+   178→}
+   179→
+   180→export function* waitForSpace(localId: LocalId): SagaIterator<Space> {
+   181→    const type = 'space';
+   182→    console.log(`Saga triggered: waitForSpace: ${type} ${localId}`);
+   183→    const mapped: Space | undefined = yield select(selectSpaceById(localId));
+   184→    if (mapped) {
+   185→        console.log(`waitForSpace: requested ${type} ${localId} -> found immediately, returning value`);
+   186→        return mapped;
+   187→    }
+   188→    console.log(`waitForSpace: requested ${type} ${localId} -> not ready, waiting`);
+   189→    const { payload: resource }: ReturnType<typeof addSpace> = yield take(
+   190→        (a: any) => a.type === addSpace.type && a.payload.id === localId
+   191→    );
+   192→    console.log(`waitForSpace: requested ${type} ${localId} -> now available, returning value ${resource}`);
+   193→    return resource;
+   194→}
+   195→
+   196→/*** loggers ***/
+   197→
+   198→export function* logPushSpaceSuccess({ payload }: { payload: PushSpaceSuccess }): SagaIterator<any> {
+   199→    console.log('push space success', payload);
+   200→}
+   201→
+   202→export function* logPushSpaceFailure({ payload }: { payload: PushSpaceRequest }): SagaIterator<any> {
+   203→    console.error('push space failure', payload);
+   204→}
+   205→
+   206→export function* logPushSpaceNoop({ payload }: { payload: PushSpaceRequest }): SagaIterator<any> {
+   207→    console.log('push space noop', payload);
+   208→}
+   209→
+   210→export function* logPullSpaceSuccess({ payload }: { payload: PullSpaceRequest }): SagaIterator<any> {
+   211→    console.log('pull space success', payload);
+   212→}
+   213→
+   214→export function* logPullSpaceFailure({ payload }: { payload: SpaceId }): SagaIterator<any> {
+   215→    console.error('pull space failure', payload);
+   216→}
+   217→
+   218→export function* logPullSpacesFailure({}: { payload: void }): SagaIterator<any> {
+   219→    console.error('list spaces failure');
+   220→}
+   221→
+   222→export function* logPullSpacesSuccess({}: { payload: void }): SagaIterator<any> {
+   223→    console.log('list spaces success');
+   224→}
+   225→
+   226→export function* logDeleteAllSpacesSuccess({}: { payload: void }): SagaIterator<any> {
+   227→    console.log('delete all spaces success');
+   228→}
+   229→
+   230→export function* logDeleteAllSpacesFailure({ payload }: { payload: { error: string } }): SagaIterator<any> {
+   231→    console.error('delete all spaces failure', payload);
+   232→}
+   233→
+   234→/*** operations ***/
+   235→
+   236→export function* handleDeleteAllSpaces(): SagaIterator<any> {
+   237→    console.log('Saga triggered: handleDeleteAllSpaces');
+   238→    try {
+   239→        const dbApi: DbApi = yield getContext('dbApi');
+   240→        const lumoApi: LumoApi = yield getContext('lumoApi');
+   241→
+   242→        yield call([lumoApi, lumoApi.callDeleteAllSpaces]);
+   243→        console.log('API delete all spaces successful, soft deleting local data');
+   244→        yield call([dbApi, dbApi.softDeleteAllData], { dirty: false });
+   245→
+   246→        const userId: string | undefined = yield select((state: LumoState) => state.user?.value?.ID);
+   247→        if (userId) {
+   248→            const searchService = SearchService.get(userId);
+   249→            yield call([searchService, searchService.clearDriveDocuments]);
+   250→        }
+   251→
+   252→        yield put(deleteAllSpaces());
+   253→        yield put(deleteAllConversations());
+   254→        yield put(deleteAllMessages());
+   255→        yield put(deleteAllAttachments());
+   256→        yield put(deleteAllIdMaps());
+   257→        yield put(
+   258→            updateLumoUserSettingsWithAutoSave({
+   259→                memories: [],
+   260→                memoryPromptsSinceAutoSave: 0,
+   261→                memoryLastProcessedMessageAt: undefined,
+   262→            })
+   263→        );
+   264→
+   265→        yield put(deleteAllSpacesSuccess());
+   266→    } catch (e) {
+   267→        console.error('Error in handleDeleteAllSpaces:', e);
+   268→        yield put(deleteAllSpacesFailure({ error: `${e}` }));
+   269→    }
+   270→}
+   271→
+   272→/*** sync: local -> remote ***/
+   273→
+   274→export function* httpPostSpace(serializedSpace: SerializedSpace, priority: Priority): SagaIterator<IdMapEntry> {
+   275→    console.log('Saga triggered: httpPostSpace', serializedSpace);
+   276→    const type: ResourceType = 'space';
+   277→    const { id: localId } = serializedSpace;
+   278→    const spaceToApi = convertNewSpaceToApi(serializedSpace);
+   279→    const lumoApi: LumoApi = yield getContext('lumoApi');
+   280→    const remoteId = yield call([lumoApi, lumoApi.postSpace], spaceToApi, priority);
+   281→    const entry = { type, localId, remoteId };
+   282→    yield put(addIdMapEntry({ ...entry, saveToIdb: true }));
+   283→    return entry;
+   284→}
+   285→
+   286→export function* httpPutSpace(
+   287→    serializedSpace: SerializedSpace,
+   288→    remoteId: RemoteId,
+   289→    priority: Priority
+   290→): SagaIterator<RemoteStatus> {
+   291→    console.log('httpPutSpace', { localId: serializedSpace.id, remoteId });
+   292→    const lumoApi: LumoApi = yield getContext('lumoApi');
+   293→    const baseSpaceToApi = convertSpaceToApi(serializedSpace);
+   294→    const spaceToApi = { ...baseSpaceToApi, ID: remoteId };
+   295→    return yield call([lumoApi, lumoApi.putSpace], spaceToApi, priority);
+   296→}
+   297→
+   298→export function* httpDeleteSpace(localId: LocalId, remoteId: RemoteId, priority: Priority): SagaIterator<RemoteStatus> {
+   299→    console.log('Saga triggered: httpDeleteSpace', { localId, remoteId });
+   300→    const type: ResourceType = 'space';
+   301→    const lumoApi: LumoApi = yield getContext('lumoApi');
+   302→    const status: RemoteStatus = yield call([lumoApi, lumoApi.deleteSpace], remoteId, priority);
+   303→    if (status === 'deleted') {
+   304→        console.log(`DELETE ${type}: ${localId} was already deleted remotely, so the http delete was a noop`);
+   305→    }
+   306→    return status;
+   307→}
+   308→
+   309→export function* pushSpace({ payload }: { payload: PushSpaceRequest }): SagaIterator<any> {
+   310→    console.log('Saga triggered: pushSpace', payload);
+   311→    const type: ResourceType = 'space';
+   312→    const { id: localId } = payload;
+   313→    const priority = payload.priority || 'urgent';
+   314→
+   315→    const isGhostChatMode: boolean = yield select((state: LumoState) => state.ghostChat?.isGhostChatMode || false);
+   316→    if (isGhostChatMode) {
+   317→        yield put(pushSpaceSuccess(payload));
+   318→        return;
+   319→    }
+   320→
+   321→    try {
+   322→        const dbApi: DbApi = yield getContext('dbApi');
+   323→        const idbSpace: SerializedSpace | undefined = yield call([dbApi, dbApi.getSpaceById], localId);
+   324→        const remoteId = yield select(selectRemoteIdFromLocal(type, localId));
+   325→
+   326→        // Deletion case
+   327→        if (idbSpace) {
+   328→            const { deleted, dirty } = idbSpace;
+   329→            // If there is an object in IDB and it has deleted+dirty flags, we push the deletion and exit
+   330→            if (deleted) {
+   331→                if (dirty) {
+   332→                    if (remoteId) {
+   333→                        const deleteArgs: [LocalId, RemoteId, Priority] = [localId, remoteId, priority];
+   334→                        yield call(callWithRetry, httpDeleteSpace, deleteArgs);
+   335→                    }
+   336→                    // Clear the dirty flag in IDB, marking the deletion was synced
+   337→                    const updated: boolean = yield call(clearDirtyIfUnchanged, idbSpace);
+   338→                    // Delete from redux, and if it was done before, it's a noop
+   339→                    yield call(deleteSpaceCascadeInRedux, localId);
+   340→                    yield put(updated ? pushSpaceSuccess(payload) : pushSpaceNeedsRetry(payload));
+   341→                } else {
+   342→                    // deletion was already synced, noop
+   343→                    yield put(pushSpaceNoop(payload));
+   344→                }
+   345→                return;
+   346→            }
+   347→        }
+   348→
+   349→        const space: Space | undefined = yield select(selectSpaceById(localId));
+   350→        if (!space) throw new Error(`cannot find ${type} ${localId} in Redux`);
+   351→        const serializedSpace: SerializedSpace = yield call(serializeSpaceSaga, space);
+   352→
+   353→        if (remoteId) {
+   354→            yield call(saveDirtySpace, serializedSpace);
+   355→            yield call(callWithRetry, httpPutSpace, [serializedSpace, remoteId, priority]);
+   356→            const updated: boolean = yield call(clearDirtyIfUnchanged, serializedSpace);
+   357→            yield put(updated ? pushSpaceSuccess(payload) : pushSpaceNeedsRetry(payload));
+   358→            return;
+   359→        }
+   360→
+   361→        yield call(saveDirtySpace, serializedSpace);
+   362→        const entry = yield call(callWithRetry, httpPostSpace, [serializedSpace, priority]);
+   363→        const updated: boolean = yield call(clearDirtyIfUnchanged, serializedSpace);
+   364→        yield put(updated ? pushSpaceSuccess({ ...payload, entry }) : pushSpaceNeedsRetry(payload));
+   365→    } catch (e) {
+   366→        // Retry unless it's a 4xx client error (in which case we expect retrying to fail again)
+   367→        console.error(e);
+   368→        if (isLimitReachedError(e)) {
+   369→            yield put(
+   370→                addResourceLimitError({
+   371→                    resource: 'spaces',
+   372→                    limit: MAX_SPACES_PER_USER,
+   373→                    serverMessage: e.serverMessage,
+   374→                })
+   375→            );
+   376→            yield put(pushSpaceFailure({ ...payload, error: `${e}` }));
+   377→        } else if (isClientError(e)) {
+   378→            yield put(pushSpaceFailure({ ...payload, error: `${e}` }));
+   379→        } else {
+   380→            yield put(pushSpaceNeedsRetry(payload));
+   381→        }
+   382→    }
+   383→}
+   384→
+   385→export function* retryPushSpace({ payload }: { payload: PushSpaceRequest }): SagaIterator<any> {
+   386→    console.log('Saga triggered: retryPushSpace', payload);
+   387→    yield delay(RETRY_PUSH_EVERY_MS);
+   388→    yield call(pushSpace, { payload: { ...payload, priority: 'background' } });
+   389→}
+   390→
+   391→/*** sync: remote -> local ***/
+   392→
+   393→export function* waitForSpaceRemoteId(localId: SpaceId): SagaIterator<SpaceId | undefined> {
+   394→    console.log('Saga triggered: waitForSpaceRemoteId', localId);
+   395→    const type = 'space';
+   396→    const existingRemoteId: RemoteId | undefined = yield select((s: LumoState) => s.idmap.local2remote[type][localId]);
+   397→    if (existingRemoteId) {
+   398→        return existingRemoteId;
+   399→    }
+   400→
+   401→    // Check if that space is local-only; if it was never pushed, it's useless to query the server
+   402→    const localSpace: Space | undefined = yield select(selectSpaceById(localId));
+   403→    if (localSpace) {
+   404→        console.log('waitForSpaceRemoteId: space was created on this device and is not yet pushed to the server');
+   405→        return undefined;
+   406→    }
+   407→
+   408→    // Trigger a general listing of spaces, which contains local-remote id mapping for each space
+   409→    yield put(pullSpacesRequest());
+   410→
+   411→    // Wait until the pullSpacesRequest is done...
+   412→    const result: ReturnType<typeof pullSpacesSuccess | typeof pullSpacesFailure> = yield take([
+   413→        pullSpacesSuccess.type,
+   414→        pullSpacesFailure.type,
+   415→    ]);
+   416→
+   417→    // Nothing we can do if pullSpacesRequest failed
+   418→    if (result.type === pullSpacesFailure.type) {
+   419→        console.error(`waitForSpaceRemoteId: Failed to pull spaces list for ${localId}`);
+   420→        yield put(pullSpaceFailure(localId));
+   421→        return undefined;
+   422→    }
+   423→
+   424→    // PullSpaces was successful; check if we have the mapping now
+   425→    const remoteId: RemoteId | undefined = yield select((s: LumoState) => s.idmap.local2remote[type][localId]);
+   426→    if (!remoteId) {
+   427→        console.error(`waitForSpaceRemoteId: Remote ID not found for ${localId} even after pulling spaces`);
+   428→        yield put(pullSpaceFailure(localId));
+   429→        return undefined;
+   430→    }
+   431→
+   432→    // We now have the mapping! return it
+   433→    return remoteId;
+   434→}
+   435→
+   436→export function* pullSpace({ payload }: { payload: PullSpaceRequest }): SagaIterator<void> {
+   437→    const { id: localId } = payload;
+   438→    console.log('Saga triggered: pullSpace', localId);
+   439→    try {
+   440→        const remoteId: SpaceId | undefined = yield call(waitForSpaceRemoteId, localId);
+   441→        if (!remoteId) {
+   442→            console.error(`pullSpace: Remote ID not found for ${localId}`);
+   443→            yield put(pullSpaceFailure(localId));
+   444→            return;
+   445→        }
+   446→
+   447→        const lumoApi: LumoApi = yield getContext('lumoApi');
+   448→        const result: GetSpaceRemote | null = yield call([lumoApi, lumoApi.getSpace], remoteId);
+   449→        if (!result) {
+   450→            console.error(`pullSpace: Space ${localId} not found on server`);
+   451→            yield put(pullSpaceFailure(localId));
+   452→            return;
+   453→        }
+   454→        yield put(pullSpaceSuccess(result));
+   455→    } catch (e) {
+   456→        console.error('Error pulling space:', e);
+   457→        yield put(pullSpaceFailure(localId));
+   458→    }
+   459→}
+   460→
+   461→export function* pullSpaces(): SagaIterator<void> {
+   462→    console.log('Saga triggered: pullSpaces');
+   463→    try {
+   464→        const lumoApi: LumoApi = yield getContext('lumoApi');
+   465→        let lastTimestamp: number | undefined;
+   466→
+   467→        while (true) {
+   468→            const listSpacesArgs = lastTimestamp ? { createTimeUntil: lastTimestamp } : undefined;
+   469→            const pageResult: ListSpacesRemote = yield call([lumoApi, lumoApi.listSpaces], listSpacesArgs);
+   470→            yield put(pullSpacesPageResponse(pageResult));
+   471→
+   472→            const allSpaces = [...listify(pageResult.spaces), ...listify(pageResult.deletedSpaces)];
+   473→            if (allSpaces.length === 0) break;
+   474→
+   475→            const newLastTimestamp = allSpaces
+   476→                .map((s) => s.createdAt)
+   477→                .map((iso: string): number => isoToUnixTimestamp(iso))
+   478→                .reduce((oldest, current) => {
+   479→                    if (!oldest) return current;
+   480→                    return current <= oldest ? current : oldest;
+   481→                }, lastTimestamp);
+   482→
+   483→            if (!newLastTimestamp || (lastTimestamp && newLastTimestamp >= lastTimestamp)) break;
+   484→
+   485→            lastTimestamp = newLastTimestamp;
+   486→            yield delay(1000);
+   487→        }
+   488→
+   489→        yield put(pullSpacesSuccess());
+   490→    } catch (e) {
+   491→        console.error('Error pulling spaces:', e);
+   492→        yield put(pullSpacesFailure());
+   493→    }
+   494→}
+   495→
+   496→export function* processPullSpacesGeneric(payload: PullSpacesRemote): SagaIterator<any> {
+   497→    const { conversations, deletedConversations, deletedSpaces, spaces, assets, deletedAssets, requestFull } = payload;
+   498→    for (const space of listify(deletedSpaces)) {
+   499→        const { wrappedSpaceKey, ...deletedSpace } = space;
+   500→        yield put(locallyDeleteSpaceFromRemoteRequest(deletedSpace.id));
+   501→    }
+   502→    for (const space of listify(spaces)) {
+   503→        yield put(locallyRefreshSpaceFromRemoteRequest(space));
+   504→    }
+   505→    for (const conversation of listify(deletedConversations)) {
+   506→        yield put(locallyDeleteConversationFromRemoteRequest(conversation.id));
+   507→    }
+   508→    for (const conversation of listify(conversations)) {
+   509→        yield put(locallyRefreshConversationFromRemoteRequest(conversation));
+   510→    }
+   511→    for (const asset of listify(deletedAssets)) {
+   512→        yield put(locallyDeleteAttachmentFromRemoteRequest(asset.id));
+   513→    }
+   514→    for (const asset of listify(assets)) {
+   515→        yield put(locallyRefreshShallowAttachmentFromRemoteRequest({ ...asset, requestFull }));
+   516→    }
+   517→}
+   518→
+   519→export function* processPullSpaceResult({ payload }: { payload: GetSpaceRemote }): SagaIterator<any> {
+   520→    console.log('Saga triggered: processPullSpaceResult', payload);
+   521→    const { space, conversations, deletedConversations, assets, deletedAssets } = payload;
+   522→    const spaces: RemoteSpace[] = [];
+   523→    const deletedSpaces: RemoteDeletedSpace[] = [];
+   524→    if (!space.deleted) {
+   525→        spaces.push(space);
+   526→    } else {
+   527→        deletedSpaces.push(space);
+   528→    }
+   529→    const pagePayload: PullSpacesRemote = {
+   530→        spaces: mapify(spaces),
+   531→        deletedSpaces: mapify(deletedSpaces),
+   532→        conversations: mapify(conversations),
+   533→        deletedConversations: mapify(deletedConversations),
+   534→        assets: mapify(assets),
+   535→        deletedAssets: mapify(deletedAssets),
+   536→        requestFull: true,
+   537→    };
+   538→    yield call(processPullSpacesGeneric, pagePayload);
+   539→}
+   540→
+   541→export function* processPullSpacesPage({ payload }: { payload: ListSpacesRemote }): SagaIterator<any> {
+   542→    console.log('Saga triggered: processPullSpacesPage', payload);
+   543→    const pagePayload: PullSpacesRemote = {
+   544→        ...payload,
+   545→        // we're requesting ALL spaces (upon app startup usually), don't pull children attachments now
+   546→        requestFull: false,
+   547→    };
+   548→    yield call(processPullSpacesGeneric, pagePayload);
+   549→}
+   550→
+   551→export function* refreshSpaceFromRemote({
+   552→    payload: encryptedRemoteSpace,
+   553→}: {
+   554→    payload: RemoteSpace;
+   555→}): SagaIterator<any> {
+   556→    console.log('Saga triggered: refreshSpaceFromRemote', encryptedRemoteSpace.id);
+   557→    const type = 'space';
+   558→    const dbApi: DbApi = yield getContext('dbApi');
+   559→    const { id: localId, remoteId } = encryptedRemoteSpace;
+   560→
+   561→    const masterKeyBase64 = yield call(waitForMasterKey, `refreshSpaceFromRemote ${localId}`);
+   562→    const masterKey: AesKwCryptoKey = yield call(base64ToMasterKey, masterKeyBase64);
+   563→    const deserializedRemoteSpace: Space | null | undefined = yield call(
+   564→        deserializeSpace,
+   565→        encryptedRemoteSpace,
+   566→        masterKey
+   567→    );
+   568→    if (!deserializedRemoteSpace) {
+   569→        console.error(`refreshSpaceFromRemote ${localId}: cannot deserialize space`);
+   570→        return;
+   571→    }
+   572→    const remoteSpace = cleanSpace(deserializedRemoteSpace);
+   573→
+   574→    const localSpace: Space | undefined = yield select(selectSpaceById(localId));
+   575→    const encryptedIdbSpace: SerializedSpace | undefined = yield call([dbApi, dbApi.getSpaceById], localId);
+   576→
+   577→    if (localSpace) {
+   578→        const isDirty = encryptedIdbSpace?.dirty || false;
+   579→
+   580→        if (isDirty) {
+   581→            console.log(`refreshSpaceFromRemote ${localId}: Local has dirty changes, keeping local`);
+   582→            return;
+   583→        }
+   584→
+   585→        console.log(`refreshSpaceFromRemote ${localId}: Updating from remote`);
+   586→        yield put(addSpace(remoteSpace));
+   587→        yield call([dbApi, dbApi.updateSpace], encryptedRemoteSpace, { dirty: false });
+   588→        return;
+   589→    }
+   590→
+   591→    if (encryptedIdbSpace) {
+   592→        const idbSpace: Space | null | undefined = yield call(deserializeSpace, encryptedIdbSpace, masterKey);
+   593→        const isDirty = encryptedIdbSpace.dirty || false;
+   594→
+   595→        if (isDirty && idbSpace) {
+   596→            console.log(`refreshSpaceFromRemote ${localId}: IDB has dirty changes, keeping IDB`);
+   597→            const cleanIdb = cleanSpace(idbSpace);
+   598→            yield put(addSpace(cleanIdb));
+   599→            yield put(addIdMapEntry({ type, localId, remoteId, saveToIdb: false }));
+   600→            return;
+   601→        }
+   602→
+   603→        console.log(`refreshSpaceFromRemote ${localId}: Updating from remote`);
+   604→        yield put(addSpace(remoteSpace));
+   605→        yield put(addIdMapEntry({ type, localId, remoteId, saveToIdb: true }));
+   606→        yield call([dbApi, dbApi.updateSpace], encryptedRemoteSpace, { dirty: false });
+   607→        return;
+   608→    }
+   609→
+   610→    console.log(`refreshSpaceFromRemote ${localId}: New space, inserting from remote`);
+   611→    yield put(addSpace(remoteSpace));
+   612→    yield put(addIdMapEntry({ type, localId, remoteId, saveToIdb: true }));
+   613→    yield call([dbApi, dbApi.updateSpace], encryptedRemoteSpace, { dirty: false });
+   614→}
+   615→
+   616→export function* reconcileProjectSearchIndex(): SagaIterator {
+   617→    try {
+   618→        const userId: string | undefined = yield select((state: LumoState) => state.user?.value?.ID);
+   619→        if (!userId) {
+   620→            return;
+   621→        }
+   622→
+   623→        const spaces: Record<string, Space> = yield select((state: LumoState) => state.spaces);
+   624→        const attachments: AttachmentMap = yield select((state: LumoState) => state.attachments);
+   625→        const indexedDriveFolders: { spaceId?: string }[] =
+   626→            (yield select((state: LumoState) => state.lumoUserSettings.indexedDriveFolders)) || [];
+   627→
+   628→        for (const space of Object.values(spaces)) {
+   629→            if (!space.isProject || space.linkedDriveFolder) {
+   630→                continue;
+   631→            }
+   632→
+   633→            if (indexedDriveFolders.some((folder) => folder.spaceId === space.id)) {
+   634→                yield call(removeIndexedContentForSpace, space.id, userId, { documentScope: 'drive-only' });
+   635→            }
+   636→        }
+   637→
+   638→        const snapshots = buildProjectKnowledgeSnapshots(spaces, attachments);
+   639→        if (snapshots.length === 0) {
+   640→            return;
+   641→        }
+   642→
+   643→        const searchService = SearchService.get(userId);
+   644→        const removed: number = yield call([searchService, searchService.reconcileStaleProjectDocuments], snapshots);
+   645→        if (removed > 0) {
+   646→            console.log('[reconcileProjectSearchIndex] Removed stale project documents:', removed);
+   647→        }
+   648→    } catch (error) {
+   649→        console.error('[reconcileProjectSearchIndex] Failed:', error);
+   650→    }
+   651→}
+   652→
+   653→export function* cleanupProjectSearchIndexOnSpaceUpdate({
+   654→    payload: space,
+   655→}: ReturnType<typeof addSpace>): SagaIterator {
+   656→    if (!space.isProject || space.linkedDriveFolder) {
+   657→        return;
+   658→    }
+   659→
+   660→    try {
+   661→        const userId: string | undefined = yield select((state: LumoState) => state.user?.value?.ID);
+   662→        if (!userId) {
+   663→            return;
+   664→        }
+   665→
+   666→        const indexedDriveFolders: { spaceId?: string }[] =
+   667→            (yield select((state: LumoState) => state.lumoUserSettings.indexedDriveFolders)) || [];
+   668→        if (indexedDriveFolders.some((folder) => folder.spaceId === space.id)) {
+   669→            yield call(removeIndexedContentForSpace, space.id, userId, { documentScope: 'drive-only' });
+   670→        }
+   671→
+   672→        const attachments: AttachmentMap = yield select((state: LumoState) => state.attachments);
+   673→        const searchService = SearchService.get(userId);
+   674→        const removed: number = yield call(
+   675→            [searchService, searchService.reconcileStaleProjectDocuments],
+   676→            [buildProjectKnowledgeSnapshot(space as Project, attachments)]
+   677→        );
+   678→        if (removed > 0) {
+   679→            console.log('[cleanupProjectSearchIndexOnSpaceUpdate] Removed stale project documents:', removed);
+   680→        }
+   681→    } catch (error) {
+   682→        console.error('[cleanupProjectSearchIndexOnSpaceUpdate] Failed:', error);
+   683→    }
+   684→}
+   685→

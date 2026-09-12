@@ -1,0 +1,1098 @@
+     1→import { HttpResponse, http } from 'msw';
+     2→
+     3→import { ActionEventV6 } from '@proton/shared/lib/api/events';
+     4→import type { LumoEventResponse } from '@proton/shared/lib/interfaces/Lumo';
+     5→
+     6→import { computeSha256AsBase64 } from '../../crypto';
+     7→import type { Base64 } from '../../types';
+     8→
+     9→// Mock database types and state
+    10→export type MockDbSpace = {
+    11→    ID: string;
+    12→    CreateTime: string;
+    13→    UpdateTime?: string; // Optional for backward compatibility with tests
+    14→    DeleteTime?: string;
+    15→    SpaceKey: string;
+    16→    SpaceTag: string;
+    17→    Encrypted: string;
+    18→};
+    19→
+    20→export type MockResponseSpace = MockDbSpace & {
+    21→    Conversations: MockResponseConversation[];
+    22→    Assets: MockResponseAsset[];
+    23→};
+    24→
+    25→export type MockDbConversation = {
+    26→    ID: string;
+    27→    SpaceID: string;
+    28→    CreateTime: string;
+    29→    UpdateTime?: string; // Optional for backward compatibility with tests
+    30→    DeleteTime?: string;
+    31→    IsStarred: boolean;
+    32→    Encrypted: string;
+    33→    ConversationTag: string;
+    34→};
+    35→
+    36→export type MockResponseConversation = MockDbConversation & {
+    37→    Messages: MockResponseMessage[];
+    38→};
+    39→
+    40→export type MockDbMessage = {
+    41→    ID: string;
+    42→    ConversationID: string;
+    43→    CreateTime: string;
+    44→    Role: number;
+    45→    Status: number;
+    46→    Encrypted: string;
+    47→    MessageTag: string;
+    48→    ParentID?: string;
+    49→};
+    50→
+    51→export type MockResponseMessage = Omit<MockDbMessage, 'Encrypted'>;
+    52→
+    53→// Add asset types
+    54→export type MockDbAsset = {
+    55→    ID: string;
+    56→    SpaceID: string;
+    57→    CreateTime: string;
+    58→    DeleteTime?: string;
+    59→    Encrypted: string;
+    60→    AssetTag: string;
+    61→};
+    62→
+    63→export type MockResponseAsset = Omit<MockDbAsset, 'Encrypted'>;
+    64→
+    65→export type MockDbUserSettings = {
+    66→    UserSettingsTag: string;
+    67→    Encrypted: string;
+    68→    CreateTime: string;
+    69→    UpdateTime: string;
+    70→};
+    71→
+    72→// Request body types
+    73→type NewSpaceRequest = {
+    74→    SpaceKey: string;
+    75→    SpaceTag: string;
+    76→    Encrypted: string;
+    77→};
+    78→
+    79→type NewConversationRequest = {
+    80→    IsStarred?: boolean;
+    81→    Encrypted: string;
+    82→    ConversationTag: string;
+    83→};
+    84→
+    85→type NewMessageRequest = {
+    86→    Role: number;
+    87→    Status: number;
+    88→    Encrypted: string;
+    89→    MessageTag: string;
+    90→    ParentID?: string;
+    91→};
+    92→
+    93→// Add to Request body types
+    94→type NewAssetRequest = {
+    95→    SpaceID: string;
+    96→    Encrypted: string;
+    97→    AssetTag: string;
+    98→};
+    99→
+   100→type UserSettingsRequest = {
+   101→    UserSettingsTag: string;
+   102→    Encrypted: string;
+   103→};
+   104→
+   105→class ResourceExistsError extends Error {
+   106→    constructor() {
+   107→        super();
+   108→        this.name = 'ResourceExistsError';
+   109→    }
+   110→}
+   111→
+   112→// Error tracking and handling class
+   113→export class MockErrorHandler {
+   114→    private errorMap: Map<string, number> = new Map();
+   115→    private errorCallbacks: Map<string, (() => void)[]> = new Map();
+   116→
+   117→    // Register an error to be returned for requests matching urlPrefix and method
+   118→    // with an optional callback to be called when the error is triggered
+   119→    injectError(urlPrefix: string, method: string, statusCode: number, callback?: () => void): void {
+   120→        const key = `${method.toUpperCase()}:${urlPrefix}`;
+   121→        this.errorMap.set(key, statusCode);
+   122→
+   123→        // Register the callback if provided
+   124→        if (callback) {
+   125→            if (!this.errorCallbacks.has(key)) {
+   126→                this.errorCallbacks.set(key, []);
+   127→            }
+   128→            this.errorCallbacks.get(key)!.push(callback);
+   129→        }
+   130→    }
+   131→
+   132→    // Clear an injected error
+   133→    clearError(urlPrefix: string, method: string): void {
+   134→        const key = `${method.toUpperCase()}:${urlPrefix}`;
+   135→        const deleted = this.errorMap.delete(key);
+   136→        if (!deleted) {
+   137→            throw new Error(`cannot clear nonexistent error handler: ${key}`);
+   138→        }
+   139→        // Also clear any callbacks
+   140→        this.errorCallbacks.delete(key);
+   141→    }
+   142→
+   143→    // Clear all registered errors and callbacks
+   144→    clearAllErrors(): void {
+   145→        this.errorMap.clear();
+   146→        this.errorCallbacks.clear();
+   147→    }
+   148→
+   149→    // Check if a request should return an error
+   150→    shouldReturnError(url: string, method: string): number | null {
+   151→        const requestMethod = method.toUpperCase();
+   152→
+   153→        // Check each registered error pattern
+   154→        for (const [key, statusCode] of this.errorMap.entries()) {
+   155→            const [errorMethod, errorUrlPrefix] = key.split(':', 2);
+   156→            if (requestMethod === errorMethod && url.startsWith(errorUrlPrefix)) {
+   157→                // Trigger any registered callbacks for this error
+   158→                this.triggerErrorCallbacks(key);
+   159→                return statusCode;
+   160→            }
+   161→        }
+   162→
+   163→        return null;
+   164→    }
+   165→
+   166→    private triggerErrorCallbacks(key: string): void {
+   167→        const callbacks = this.errorCallbacks.get(key) || [];
+   168→        for (const callback of callbacks) {
+   169→            callback();
+   170→        }
+   171→    }
+   172→}
+   173→
+   174→export class MockDatabase {
+   175→    private spaces: Map<string, MockDbSpace> = new Map();
+   176→    private conversations: Map<string, MockDbConversation> = new Map();
+   177→    private messages: Map<string, MockDbMessage> = new Map();
+   178→    private assets: Map<string, MockDbAsset> = new Map();
+   179→    private userSettings: MockDbUserSettings | null = null;
+   180→    private nextSpaceId = 1;
+   181→    private nextConversationId = 1;
+   182→    private nextMessageId = 1;
+   183→    private nextAssetId = 1;
+   184→    private conflictErrors: Map<string, number> = new Map(); // { localId => nbErrors }
+   185→    private lumoEventId = 0;
+   186→    private lumoEventLog: LumoEventResponse[] = [];
+   187→
+   188→    getLatestLumoEventId(): string {
+   189→        return String(this.lumoEventId);
+   190→    }
+   191→
+   192→    getLumoEventsAfter(eventId: string): LumoEventResponse {
+   193→        const from = Number(eventId);
+   194→        if (Number.isNaN(from) || from >= this.lumoEventId) {
+   195→            return this.emptyLumoEventResponse();
+   196→        }
+   197→
+   198→        const event = this.lumoEventLog[from];
+   199→        return {
+   200→            ...event,
+   201→            More: from + 1 < this.lumoEventId,
+   202→        };
+   203→    }
+   204→
+   205→    enqueueLumoEvent(
+   206→        event: Partial<
+   207→            Pick<
+   208→                LumoEventResponse,
+   209→                'LumoSpaces' | 'LumoConversations' | 'LumoMessages' | 'LumoAssets' | 'LumoUserSettings' | 'Refresh'
+   210→            >
+   211→        >
+   212→    ): void {
+   213→        this.lumoEventId += 1;
+   214→        this.lumoEventLog.push({
+   215→            More: false,
+   216→            Refresh: false,
+   217→            EventID: String(this.lumoEventId),
+   218→            LumoSpaces: null,
+   219→            LumoConversations: null,
+   220→            LumoMessages: null,
+   221→            LumoAssets: null,
+   222→            LumoUserSettings: null,
+   223→            ...event,
+   224→        });
+   225→    }
+   226→
+   227→    recordLumoSpaceEvent(id: string, action: ActionEventV6): void {
+   228→        this.enqueueLumoEvent({ LumoSpaces: [{ ID: id, Action: action }] });
+   229→    }
+   230→
+   231→    recordLumoConversationEvent(id: string, action: ActionEventV6): void {
+   232→        this.enqueueLumoEvent({ LumoConversations: [{ ID: id, Action: action }] });
+   233→    }
+   234→
+   235→    recordLumoUserSettingsEvent(id: string, action: ActionEventV6): void {
+   236→        this.enqueueLumoEvent({ LumoUserSettings: [{ ID: id, Action: action }] });
+   237→    }
+   238→
+   239→    getUserSettings(): MockDbUserSettings | null {
+   240→        return this.userSettings;
+   241→    }
+   242→
+   243→    setUserSettings(settings: MockDbUserSettings): void {
+   244→        this.userSettings = settings;
+   245→    }
+   246→
+   247→    private emptyLumoEventResponse(): LumoEventResponse {
+   248→        return {
+   249→            More: false,
+   250→            Refresh: false,
+   251→            EventID: String(this.lumoEventId),
+   252→            LumoSpaces: null,
+   253→            LumoConversations: null,
+   254→            LumoMessages: null,
+   255→            LumoAssets: null,
+   256→            LumoUserSettings: null,
+   257→        };
+   258→    }
+   259→
+   260→    // Space operations
+   261→    addSpace(space: MockDbSpace): void {
+   262→        const existing = Array.from(this.spaces.values()).some((c) => c.SpaceTag === space.SpaceTag);
+   263→        if (existing) {
+   264→            this.registerConflictError(space.SpaceTag);
+   265→            throw new ResourceExistsError();
+   266→        }
+   267→        this.spaces.set(space.ID, space);
+   268→    }
+   269→
+   270→    getSpace(id: string): MockDbSpace | undefined {
+   271→        return this.spaces.get(id);
+   272→    }
+   273→
+   274→    listSpaces(): MockDbSpace[] {
+   275→        return Array.from(this.spaces.values());
+   276→    }
+   277→
+   278→    listSpacesPaginated(createTimeSince?: string, createTimeUntil?: string, pageSize: number = 100): MockDbSpace[] {
+   279→        let spaces = Array.from(this.spaces.values());
+   280→
+   281→        // Filter by creation time if parameters are provided
+   282→        if (createTimeSince) {
+   283→            spaces = spaces.filter((space) => space.CreateTime >= createTimeSince);
+   284→        }
+   285→        if (createTimeUntil) {
+   286→            spaces = spaces.filter((space) => space.CreateTime <= createTimeUntil);
+   287→        }
+   288→
+   289→        // Sort by CreateTime DESC, then by ID DESC
+   290→        spaces.sort((a, b) => {
+   291→            const timeCompare = b.CreateTime.localeCompare(a.CreateTime);
+   292→            if (timeCompare !== 0) return timeCompare;
+   293→            return b.ID.localeCompare(a.ID);
+   294→        });
+   295→
+   296→        // Apply page size limit
+   297→        return spaces.slice(0, pageSize);
+   298→    }
+   299→
+   300→    updateSpace(space: MockDbSpace): void {
+   301→        const existing = this.spaces.get(space.ID);
+   302→        if (!existing) {
+   303→            throw new Error(`Space ${space.ID} not found`);
+   304→        }
+   305→        this.spaces.set(space.ID, space);
+   306→    }
+   307→
+   308→    deleteSpace(id: string): boolean {
+   309→        const space = this.spaces.get(id);
+   310→        if (!space) return false;
+   311→
+   312→        // Soft delete the space and all its conversations
+   313→        space.DeleteTime = new Date().toISOString();
+   314→        this.spaces.set(id, space);
+   315→
+   316→        // Soft delete all conversations in this space
+   317→        const conversations = this.getConversationsBySpaceId(id);
+   318→        conversations.forEach((c) => {
+   319→            c.DeleteTime = space.DeleteTime;
+   320→            this.conversations.set(c.ID, c);
+   321→        });
+   322→
+   323→        return true;
+   324→    }
+   325→
+   326→    getConversationsBySpaceId(id: string): MockDbConversation[] {
+   327→        const iter = Array.from(this.conversations.values()).filter((c) => c.SpaceID === id);
+   328→        return [...iter];
+   329→    }
+   330→
+   331→    async getNextSpaceId(): Promise<string> {
+   332→        return serverId(this.nextSpaceId++);
+   333→    }
+   334→
+   335→    async getNextConversationId(): Promise<string> {
+   336→        return serverId(this.nextConversationId++);
+   337→    }
+   338→
+   339→    async getNextMessageId(): Promise<string> {
+   340→        return serverId(this.nextMessageId++);
+   341→    }
+   342→
+   343→    // Conversation operations
+   344→    addConversation(conversation: MockDbConversation): void {
+   345→        const existing = Array.from(this.conversations.values()).some(
+   346→            (c) => c.ConversationTag === conversation.ConversationTag
+   347→        );
+   348→        if (existing) {
+   349→            this.registerConflictError(conversation.ConversationTag);
+   350→            throw new ResourceExistsError();
+   351→        }
+   352→        this.conversations.set(conversation.ID, conversation);
+   353→    }
+   354→
+   355→    // Message operations
+   356→    addMessage(message: MockDbMessage): void {
+   357→        const existing = Array.from(this.messages.values()).some((c) => c.MessageTag === message.MessageTag);
+   358→        if (existing) {
+   359→            this.registerConflictError(message.MessageTag);
+   360→            throw new ResourceExistsError();
+   361→        }
+   362→        this.messages.set(message.ID, message);
+   363→    }
+   364→
+   365→    getConversation(id: string): MockDbConversation | undefined {
+   366→        return this.conversations.get(id);
+   367→    }
+   368→
+   369→    getMessagesByConversationId(id: string): MockDbMessage[] {
+   370→        const messages = Array.from(this.messages.values()).filter((m) => m.ConversationID === id);
+   371→        // Sort by CreateTime ASC
+   372→        messages.sort((a, b) => a.CreateTime.localeCompare(b.CreateTime));
+   373→        return messages;
+   374→    }
+   375→
+   376→    getMessage(id: string): MockDbMessage | undefined {
+   377→        return this.messages.get(id);
+   378→    }
+   379→
+   380→    // Asset operations
+   381→    addAsset(asset: MockDbAsset): void {
+   382→        const existing = Array.from(this.assets.values()).some((a) => a.AssetTag === asset.AssetTag);
+   383→        if (existing) {
+   384→            this.registerConflictError(asset.AssetTag);
+   385→            throw new ResourceExistsError();
+   386→        }
+   387→        this.assets.set(asset.ID, asset);
+   388→    }
+   389→
+   390→    getAsset(id: string): MockDbAsset | undefined {
+   391→        return this.assets.get(id);
+   392→    }
+   393→
+   394→    getAssetsBySpaceId(id: string): MockDbAsset[] {
+   395→        return Array.from(this.assets.values()).filter((a) => a.SpaceID === id);
+   396→    }
+   397→
+   398→    deleteAsset(id: string): boolean {
+   399→        const asset = this.assets.get(id);
+   400→        if (!asset) return false;
+   401→
+   402→        // Soft delete the asset
+   403→        asset.DeleteTime = new Date().toISOString();
+   404→        this.assets.set(id, asset);
+   405→        return true;
+   406→    }
+   407→
+   408→    async getNextAssetId(): Promise<string> {
+   409→        return serverId(this.nextAssetId++);
+   410→    }
+   411→
+   412→    populateSpaces(spaces: MockDbSpace[]): MockResponseSpace[] {
+   413→        return spaces.map((s: MockDbSpace): MockResponseSpace => {
+   414→            const conversations = this.getConversationsBySpaceId(s.ID);
+   415→            const assets = this.getAssetsBySpaceId(s.ID);
+   416→
+   417→            return {
+   418→                ...s,
+   419→                Conversations: conversations.map((c) => ({ ...c, Messages: [] })),
+   420→                Assets: assets.map(({ Encrypted, ...rest }) => rest),
+   421→            };
+   422→        });
+   423→    }
+   424→
+   425→    getNbConflictErrors(id: string): number {
+   426→        return this.conflictErrors.get(id) ?? 0;
+   427→    }
+   428→
+   429→    private registerConflictError(tag: string) {
+   430→        this.conflictErrors.set(tag, (this.conflictErrors.get(tag) ?? 0) + 1);
+   431→    }
+   432→}
+   433→
+   434→// Helper function to generate server IDs
+   435→export async function serverId(id: number): Promise<string> {
+   436→    const salt = 'FBbzCxGXo+a3YbXJHWQtxbWuRqoMhych';
+   437→    return computeSha256AsBase64(`${salt}${id}`, true);
+   438→}
+   439→
+   440→// Helper function to check for "undefined" string values in URL or route parameters
+   441→function checkForUndefinedParams(
+   442→    request: Request,
+   443→    params: Record<string, string | readonly string[] | undefined>
+   444→): void {
+   445→    // Check route parameters
+   446→    for (const [key, value] of Object.entries(params)) {
+   447→        if (value === 'undefined') {
+   448→            const e = new Error(`Route parameter '${key}' has string value 'undefined'`);
+   449→            console.error(e);
+   450→            throw e;
+   451→        }
+   452→    }
+   453→
+   454→    // Check URL query parameters
+   455→    const url = new URL(request.url);
+   456→    for (const [key, value] of url.searchParams.entries()) {
+   457→        if (value === 'undefined') {
+   458→            const e = new Error(`URL query parameter '${key}' has string value 'undefined'`);
+   459→            console.error(e);
+   460→            throw e;
+   461→        }
+   462→    }
+   463→}
+   464→
+   465→// Helper function to create 400 Bad Request response
+   466→function createBadRequestResponse(errorMessage: string) {
+   467→    return new HttpResponse(JSON.stringify({ Code: 4000, Error: errorMessage }), {
+   468→        status: 400,
+   469→        headers: { 'Content-Type': 'application/json' },
+   470→    });
+   471→}
+   472→
+   473→// Helper function to parse unix timestamp parameter
+   474→function parseUnixTimestamp(paramValue: string | null): string | undefined {
+   475→    if (!paramValue) {
+   476→        return undefined;
+   477→    }
+   478→
+   479→    // Strict integer parsing - must be all digits, no whitespace, no partial parsing
+   480→    if (!/^\d+$/.test(paramValue)) {
+   481→        throw new Error(`Invalid timestamp format: ${paramValue}`);
+   482→    }
+   483→
+   484→    const timestamp = parseInt(paramValue, 10);
+   485→
+   486→    // Additional safety check - ensure the parsed number converts back to the same string
+   487→    if (timestamp.toString() !== paramValue) {
+   488→        throw new Error(`Invalid timestamp format: ${paramValue}`);
+   489→    }
+   490→
+   491→    return new Date(timestamp * 1000).toISOString();
+   492→}
+   493→
+   494→// MSW handlers for the mock server
+   495→export function createHandlers(mockDb: MockDatabase, errorHandler?: MockErrorHandler) {
+   496→    // Use default error handler if none provided
+   497→    const errors = errorHandler || new MockErrorHandler();
+   498→
+   499→    // Helper to check for injected errors
+   500→    const checkForError = (url: string, method: string) => {
+   501→        console.log(`mock server: checkForError: checking for ${method} ${url}`);
+   502→        const statusCode = errors.shouldReturnError(url, method);
+   503→        if (statusCode) {
+   504→            console.log(`mock server: injected error ${statusCode} for ${method} ${url}`);
+   505→            return new HttpResponse(JSON.stringify({ Code: 5000, Error: 'Injected error' }), {
+   506→                status: statusCode,
+   507→                headers: { 'Content-Type': 'application/json' },
+   508→            });
+   509→        }
+   510→        return null;
+   511→    };
+   512→
+   513→    return [
+   514→        http.post('/api/lumo/v1/spaces', async ({ request, params }) => {
+   515→            // Check for injected error
+   516→            const errorResponse = checkForError('/api/lumo/v1/spaces', 'POST');
+   517→            if (errorResponse) return errorResponse;
+   518→
+   519→            // Check for "undefined" parameter values
+   520→            checkForUndefinedParams(request, params);
+   521→
+   522→            const body = (await request.json()) as NewSpaceRequest;
+   523→            console.log(`mock server: http post /api/lumo/v1/spaces <-`, body);
+   524→
+   525→            try {
+   526→                const nextSpaceId = await mockDb.getNextSpaceId();
+   527→                console.log(`mock server: generated space ID:`, nextSpaceId);
+   528→
+   529→                const now = new Date().toISOString();
+   530→                const space: MockDbSpace = {
+   531→                    ID: nextSpaceId,
+   532→                    CreateTime: now,
+   533→                    UpdateTime: now,
+   534→                    SpaceKey: body.SpaceKey,
+   535→                    SpaceTag: body.SpaceTag,
+   536→                    Encrypted: body.Encrypted,
+   537→                };
+   538→                console.log(`mock server: about to add space:`, space);
+   539→
+   540→                mockDb.addSpace(space);
+   541→                mockDb.recordLumoSpaceEvent(space.ID, ActionEventV6.Create);
+   542→                console.log(`mock server: space added successfully`);
+   543→
+   544→                const response = { Code: 1000, Space: { ID: space.ID } };
+   545→                console.log(`mock server: http post /api/lumo/v1/spaces ->`, response);
+   546→                return HttpResponse.json(response);
+   547→            } catch (error) {
+   548→                console.error(`mock server: ERROR in POST spaces:`, error);
+   549→                if (error instanceof ResourceExistsError) {
+   550→                    console.log(`mock server: space already exists, returning 409`);
+   551→                    return HttpResponse.json({ error: 'Resource already exists' }, { status: 409 });
+   552→                }
+   553→                console.log(`mock server: unexpected error, returning 500`);
+   554→                return new HttpResponse(JSON.stringify({ Code: 5000, Error: 'Internal server error' }), {
+   555→                    status: 500,
+   556→                    headers: { 'Content-Type': 'application/json' },
+   557→                });
+   558→            }
+   559→        }),
+   560→
+   561→        http.get('/api/lumo/v1/spaces', ({ request, params }) => {
+   562→            try {
+   563→                // Check for injected error
+   564→                const errorResponse = checkForError('/api/lumo/v1/spaces', 'GET');
+   565→                if (errorResponse) return errorResponse;
+   566→
+   567→                // Check for "undefined" parameter values
+   568→                checkForUndefinedParams(request, params);
+   569→
+   570→                const url = new URL(request.url);
+   571→                const pageSizeParam = url.searchParams.get('PageSize');
+   572→
+   573→                // Parse unix timestamps with validation
+   574→                let createTimeSince: string | undefined;
+   575→                let createTimeUntil: string | undefined;
+   576→
+   577→                try {
+   578→                    createTimeSince = parseUnixTimestamp(url.searchParams.get('CreateTimeSince'));
+   579→                    createTimeUntil = parseUnixTimestamp(url.searchParams.get('CreateTimeUntil'));
+   580→                } catch (error) {
+   581→                    const errorMessage = error instanceof Error ? error.message : 'Invalid timestamp parameter';
+   582→                    return createBadRequestResponse(errorMessage);
+   583→                }
+   584→
+   585→                const pageSize = pageSizeParam ? parseInt(pageSizeParam, 10) : 100;
+   586→                console.log(`mock server: http get /api/lumo/v1/spaces <- params:`, {
+   587→                    createTimeSince,
+   588→                    createTimeUntil,
+   589→                    pageSize,
+   590→                });
+   591→
+   592→                const spaces = mockDb.listSpacesPaginated(createTimeSince, createTimeUntil, pageSize);
+   593→                const populatedSpaces = mockDb.populateSpaces(spaces);
+   594→                return HttpResponse.json({
+   595→                    Code: 1000,
+   596→                    Spaces: populatedSpaces,
+   597→                });
+   598→            } catch (error) {
+   599→                console.error(`mock server: ERROR in GET /api/lumo/v1/spaces:`, error);
+   600→                return new HttpResponse(JSON.stringify({ Code: 5000, Error: 'Internal server error' }), {
+   601→                    status: 500,
+   602→                    headers: { 'Content-Type': 'application/json' },
+   603→                });
+   604→            }
+   605→        }),
+   606→
+   607→        http.get('/api/lumo/v1/spaces/:id', ({ params, request }) => {
+   608→            const id = params.id as string;
+   609→
+   610→            // Check for injected error
+   611→            const errorResponse = checkForError(`/api/lumo/v1/spaces/${id}`, 'GET');
+   612→            if (errorResponse) return errorResponse;
+   613→
+   614→            // Check for "undefined" parameter values
+   615→            checkForUndefinedParams(request, params);
+   616→
+   617→            console.log(`mock server: http get /api/lumo/v1/spaces/${id}`);
+   618→            const space = mockDb.getSpace(id);
+   619→            console.log(`mock server: http get /api/lumo/v1/spaces/${id} ->`, space);
+   620→            if (!space) {
+   621→                return new HttpResponse(null, { status: 404 });
+   622→            }
+   623→
+   624→            // Get conversations and assets for this space
+   625→            const conversations = mockDb.getConversationsBySpaceId(id);
+   626→            const assets = mockDb.getAssetsBySpaceId(id);
+   627→
+   628→            // Create response with populated space
+   629→            const response = {
+   630→                Code: 1000,
+   631→                Space: {
+   632→                    ...space,
+   633→                    Conversations: conversations.map((c) => ({ ...c, Messages: [] })),
+   634→                    Assets: assets.map(({ Encrypted, ...rest }) => rest),
+   635→                },
+   636→            };
+   637→            return HttpResponse.json(response);
+   638→        }),
+   639→
+   640→        http.delete('/api/lumo/v1/spaces', ({ request, params }) => {
+   641→            // Check for injected error
+   642→            const errorResponse = checkForError('/api/lumo/v1/spaces', 'DELETE');
+   643→            if (errorResponse) return errorResponse;
+   644→
+   645→            // Check for "undefined" parameter values
+   646→            checkForUndefinedParams(request, params);
+   647→
+   648→            console.log('mock server: http delete /api/lumo/v1/spaces (bulk delete)');
+   649→            const allSpaces = mockDb.listSpaces();
+   650→            const deletedCount = allSpaces.length;
+   651→
+   652→            // Delete all spaces (this will cascade to conversations)
+   653→            allSpaces.forEach((space) => {
+   654→                mockDb.deleteSpace(space.ID);
+   655→            });
+   656→
+   657→            console.log(`mock server: http delete /api/lumo/v1/spaces -> deleted ${deletedCount} spaces`);
+   658→            return HttpResponse.json({
+   659→                Code: 1000,
+   660→                DeletedCount: deletedCount,
+   661→            });
+   662→        }),
+   663→
+   664→        http.delete('/api/lumo/v1/spaces/:id', ({ params, request }) => {
+   665→            const id = params.id as string;
+   666→
+   667→            // Check for injected error
+   668→            const errorResponse = checkForError(`/api/lumo/v1/spaces/${id}`, 'DELETE');
+   669→            if (errorResponse) return errorResponse;
+   670→
+   671→            // Check for "undefined" parameter values
+   672→            checkForUndefinedParams(request, params);
+   673→
+   674→            console.log(`mock server: http delete /api/lumo/v1/spaces/${id}`);
+   675→            const success = mockDb.deleteSpace(id);
+   676→            console.log(`mock server: http delete /api/lumo/v1/spaces/${id} ->`, success ? 'deleted' : 'not found');
+   677→            if (!success) {
+   678→                return new HttpResponse(null, { status: 404 });
+   679→            }
+   680→            mockDb.recordLumoSpaceEvent(id, ActionEventV6.Delete);
+   681→            return HttpResponse.json({
+   682→                Code: 1000,
+   683→            });
+   684→        }),
+   685→
+   686→        http.put('/api/lumo/v1/spaces/:spaceId', async ({ request, params }) => {
+   687→            const spaceId = params.spaceId as string;
+   688→
+   689→            // Check for injected error
+   690→            const errorResponse = checkForError(`/api/lumo/v1/spaces/${spaceId}`, 'PUT');
+   691→            if (errorResponse) return errorResponse;
+   692→
+   693→            // Check for "undefined" parameter values
+   694→            checkForUndefinedParams(request, params);
+   695→
+   696→            const body = (await request.json()) as {
+   697→                SpaceKey?: string;
+   698→                Encrypted?: string;
+   699→            };
+   700→            console.log(`mock server: http put /api/lumo/v1/spaces/${spaceId} <-`, body);
+   701→
+   702→            // Verify the space exists
+   703→            const space = mockDb.getSpace(spaceId);
+   704→            if (!space) {
+   705→                console.log(`mock server: http put /api/lumo/v1/spaces/${spaceId} -> 404 Not Found`);
+   706→                return new HttpResponse(null, { status: 404 });
+   707→            }
+   708→
+   709→            // Update the space
+   710→            if (body.SpaceKey !== undefined) {
+   711→                space.SpaceKey = body.SpaceKey;
+   712→            }
+   713→            if (body.Encrypted !== undefined) {
+   714→                space.Encrypted = body.Encrypted as Base64;
+   715→            }
+   716→
+   717→            mockDb.updateSpace(space);
+   718→            mockDb.recordLumoSpaceEvent(spaceId, ActionEventV6.Update);
+   719→            const response = { Code: 1000 };
+   720→            console.log(`mock server: http put /api/lumo/v1/spaces/${spaceId} ->`, response);
+   721→            return HttpResponse.json(response);
+   722→        }),
+   723→
+   724→        http.post('/api/lumo/v1/spaces/:spaceId/conversations', async ({ request, params }) => {
+   725→            const spaceId = params.spaceId as string;
+   726→
+   727→            // Check for injected error
+   728→            const errorResponse = checkForError(`/api/lumo/v1/spaces/${spaceId}/conversations`, 'POST');
+   729→            if (errorResponse) return errorResponse;
+   730→
+   731→            // Check for "undefined" parameter values
+   732→            checkForUndefinedParams(request, params);
+   733→
+   734→            const body = (await request.json()) as NewConversationRequest;
+   735→            console.log(`mock server: http post /api/lumo/v1/spaces/${spaceId}/conversations <-`, body);
+   736→
+   737→            // Verify the space exists
+   738→            const space = mockDb.getSpace(spaceId);
+   739→            if (!space) {
+   740→                console.log(`mock server: http post /api/lumo/v1/spaces/${spaceId}/conversations -> 404 Not Found`);
+   741→                return new HttpResponse(null, { status: 404 });
+   742→            }
+   743→
+   744→            const now = new Date().toISOString();
+   745→            const conversation: MockDbConversation = {
+   746→                ID: await mockDb.getNextConversationId(),
+   747→                SpaceID: spaceId,
+   748→                CreateTime: now,
+   749→                UpdateTime: now,
+   750→                IsStarred: body.IsStarred ?? false,
+   751→                Encrypted: body.Encrypted,
+   752→                ConversationTag: body.ConversationTag,
+   753→            };
+   754→            mockDb.addConversation(conversation);
+   755→            mockDb.recordLumoConversationEvent(conversation.ID, ActionEventV6.Create);
+   756→            const response = { Code: 1000, Conversation: { ID: conversation.ID } };
+   757→            console.log(`mock server: http post /api/lumo/v1/spaces/${spaceId}/conversations ->`, response);
+   758→            return HttpResponse.json(response);
+   759→        }),
+   760→
+   761→        http.get('/api/lumo/v1/conversations/:conversationId', ({ params, request }) => {
+   762→            const conversationId = params.conversationId as string;
+   763→
+   764→            // Check for injected error
+   765→            const errorResponse = checkForError(`/api/lumo/v1/conversations/${conversationId}`, 'GET');
+   766→            if (errorResponse) return errorResponse;
+   767→
+   768→            // Check for "undefined" parameter values
+   769→            checkForUndefinedParams(request, params);
+   770→
+   771→            console.log(`mock server: http get /api/lumo/v1/conversations/${conversationId}`);
+   772→            const conversation = mockDb.getConversation(conversationId);
+   773→            console.log(`mock server: http get /api/lumo/v1/conversations/${conversationId} ->`, conversation);
+   774→            if (!conversation) {
+   775→                return new HttpResponse(null, { status: 404 });
+   776→            }
+   777→
+   778→            const messages = mockDb.getMessagesByConversationId(conversationId);
+   779→            const shallowMessages = messages.map(({ Encrypted, ...rest }) => rest);
+   780→            return HttpResponse.json({
+   781→                Code: 1000,
+   782→                Conversation: {
+   783→                    ...conversation,
+   784→                    Messages: shallowMessages,
+   785→                },
+   786→            });
+   787→        }),
+   788→
+   789→        http.post('/api/lumo/v1/conversations/:conversationId/messages', async ({ request, params }) => {
+   790→            const conversationId = params.conversationId as string;
+   791→
+   792→            // Check for injected error
+   793→            const errorResponse = checkForError(`/api/lumo/v1/conversations/${conversationId}/messages`, 'POST');
+   794→            if (errorResponse) return errorResponse;
+   795→
+   796→            // Check for "undefined" parameter values
+   797→            checkForUndefinedParams(request, params);
+   798→
+   799→            const body = (await request.json()) as NewMessageRequest;
+   800→            console.log(`mock server: http post /api/lumo/v1/conversations/${conversationId}/messages <-`, body);
+   801→
+   802→            // Verify the conversation exists
+   803→            const conversation = mockDb.getConversation(conversationId);
+   804→            if (!conversation) {
+   805→                console.log(
+   806→                    `mock server: http post /api/lumo/v1/conversations/${conversationId}/messages -> 404 Not Found`
+   807→                );
+   808→                return new HttpResponse(null, { status: 404 });
+   809→            }
+   810→
+   811→            const message: MockDbMessage = {
+   812→                ID: await mockDb.getNextMessageId(),
+   813→                ConversationID: conversationId,
+   814→                CreateTime: new Date().toISOString(),
+   815→                Role: body.Role,
+   816→                Status: body.Status,
+   817→                Encrypted: body.Encrypted,
+   818→                MessageTag: body.MessageTag,
+   819→                ParentID: body.ParentID,
+   820→            };
+   821→            try {
+   822→                console.log('mockDb.addMessage');
+   823→                mockDb.addMessage(message);
+   824→            } catch (e) {
+   825→                if (e instanceof ResourceExistsError) {
+   826→                    return HttpResponse.json({ error: 'Resource already exists' }, { status: 409 });
+   827→                }
+   828→                throw e;
+   829→            }
+   830→
+   831→            // Return shallow message in response (without Encrypted field)
+   832→            const { Encrypted, ...shallowMessage } = message;
+   833→            const response = { Code: 1000, Message: shallowMessage };
+   834→            console.log(`mock server: http post /api/lumo/v1/conversations/${conversationId}/messages ->`, response);
+   835→            return HttpResponse.json(response);
+   836→        }),
+   837→
+   838→        http.put('/api/lumo/v1/conversations/:conversationId', async ({ request, params }) => {
+   839→            const conversationId = params.conversationId as string;
+   840→
+   841→            // Check for injected error
+   842→            const errorResponse = checkForError(`/api/lumo/v1/conversations/${conversationId}`, 'PUT');
+   843→            if (errorResponse) return errorResponse;
+   844→
+   845→            // Check for "undefined" parameter values
+   846→            checkForUndefinedParams(request, params);
+   847→
+   848→            const body = (await request.json()) as { IsStarred?: boolean; Encrypted?: string };
+   849→            console.log(`mock server: http put /api/lumo/v1/conversations/${conversationId} <-`, body);
+   850→
+   851→            // Verify the conversation exists
+   852→            const conversation = mockDb.getConversation(conversationId);
+   853→            if (!conversation) {
+   854→                console.log(`mock server: http put /api/lumo/v1/conversations/${conversationId} -> 404 Not Found`);
+   855→                return new HttpResponse(null, { status: 404 });
+   856→            }
+   857→
+   858→            // Update the conversation
+   859→            if (body.IsStarred !== undefined) {
+   860→                conversation.IsStarred = body.IsStarred;
+   861→            }
+   862→            if (body.Encrypted !== undefined) {
+   863→                conversation.Encrypted = body.Encrypted;
+   864→            }
+   865→            mockDb.addConversation(conversation);
+   866→            mockDb.recordLumoConversationEvent(conversationId, ActionEventV6.Update);
+   867→
+   868→            const messages = mockDb.getMessagesByConversationId(conversationId);
+   869→            const shallowMessages = messages.map(({ Encrypted, ...rest }) => rest);
+   870→            const response = {
+   871→                Code: 1000,
+   872→                Conversation: {
+   873→                    ...conversation,
+   874→                    Messages: shallowMessages,
+   875→                },
+   876→            };
+   877→            console.log(`mock server: http put /api/lumo/v1/conversations/${conversationId} ->`, response);
+   878→            return HttpResponse.json(response);
+   879→        }),
+   880→
+   881→        http.get('/api/lumo/v1/events/latest', ({ request }) => {
+   882→            const errorResponse = checkForError('/api/lumo/v1/events/latest', 'GET');
+   883→            if (errorResponse) return errorResponse;
+   884→
+   885→            checkForUndefinedParams(request, {});
+   886→
+   887→            const eventId = mockDb.getLatestLumoEventId();
+   888→            console.log(`mock server: http get /api/lumo/v1/events/latest ->`, { EventID: eventId });
+   889→            return HttpResponse.json({ EventID: eventId });
+   890→        }),
+   891→
+   892→        http.get('/api/lumo/v1/events/:eventId', ({ params, request }) => {
+   893→            const eventId = params.eventId as string;
+   894→
+   895→            const errorResponse = checkForError(`/api/lumo/v1/events/${eventId}`, 'GET');
+   896→            if (errorResponse) return errorResponse;
+   897→
+   898→            checkForUndefinedParams(request, params);
+   899→
+   900→            const response = mockDb.getLumoEventsAfter(eventId);
+   901→            console.log(`mock server: http get /api/lumo/v1/events/${eventId} ->`, response);
+   902→            return HttpResponse.json(response);
+   903→        }),
+   904→
+   905→        // Add asset/attachment handlers
+   906→        http.post('/api/lumo/v1/spaces/:spaceId/assets', async ({ request, params }) => {
+   907→            const spaceId = params.spaceId as string;
+   908→
+   909→            // Check for injected error
+   910→            const errorResponse = checkForError(`/api/lumo/v1/spaces/${spaceId}/assets`, 'POST');
+   911→            if (errorResponse) return errorResponse;
+   912→
+   913→            // Check for "undefined" parameter values
+   914→            checkForUndefinedParams(request, params);
+   915→
+   916→            const body = (await request.json()) as NewAssetRequest;
+   917→            console.log(`mock server: http post /api/lumo/v1/spaces/${spaceId}/assets <-`, body);
+   918→
+   919→            // Verify the space exists
+   920→            const space = mockDb.getSpace(spaceId);
+   921→            if (!space) {
+   922→                console.log(`mock server: http post /api/lumo/v1/spaces/${spaceId}/assets -> 404 Not Found`);
+   923→                return new HttpResponse(null, { status: 404 });
+   924→            }
+   925→
+   926→            const asset: MockDbAsset = {
+   927→                ID: await mockDb.getNextAssetId(),
+   928→                SpaceID: spaceId,
+   929→                CreateTime: new Date().toISOString(),
+   930→                Encrypted: body.Encrypted,
+   931→                AssetTag: body.AssetTag,
+   932→            };
+   933→            mockDb.addAsset(asset);
+   934→            const response = { Code: 1000, Asset: { ID: asset.ID } };
+   935→            console.log(`mock server: http post /api/lumo/v1/spaces/${spaceId}/assets ->`, response);
+   936→            return HttpResponse.json(response);
+   937→        }),
+   938→
+   939→        http.get('/api/lumo/v1/assets/:assetId', ({ params, request }) => {
+   940→            const assetId = params.assetId as string;
+   941→
+   942→            // Check for injected error
+   943→            const errorResponse = checkForError(`/api/lumo/v1/assets/${assetId}`, 'GET');
+   944→            if (errorResponse) return errorResponse;
+   945→
+   946→            // Check for "undefined" parameter values
+   947→            checkForUndefinedParams(request, params);
+   948→
+   949→            console.log(`mock server: http get /api/lumo/v1/assets/${assetId}`);
+   950→            const asset = mockDb.getAsset(assetId);
+   951→            console.log(`mock server: http get /api/lumo/v1/assets/${assetId} ->`, asset);
+   952→            if (!asset) {
+   953→                return new HttpResponse(null, { status: 404 });
+   954→            }
+   955→
+   956→            // Return shallow asset in response (without Encrypted field)
+   957→            const { Encrypted, ...shallowAsset } = asset;
+   958→            return HttpResponse.json({
+   959→                Code: 1000,
+   960→                Asset: shallowAsset,
+   961→            });
+   962→        }),
+   963→
+   964→        http.put('/api/lumo/v1/assets/:assetId', async ({ request, params }) => {
+   965→            const assetId = params.assetId as string;
+   966→
+   967→            // Check for injected error
+   968→            const errorResponse = checkForError(`/api/lumo/v1/assets/${assetId}`, 'PUT');
+   969→            if (errorResponse) return errorResponse;
+   970→
+   971→            // Check for "undefined" parameter values
+   972→            checkForUndefinedParams(request, params);
+   973→
+   974→            const body = (await request.json()) as { Encrypted?: string };
+   975→            console.log(`mock server: http put /api/lumo/v1/assets/${assetId} <-`, body);
+   976→
+   977→            // Verify the asset exists
+   978→            const asset = mockDb.getAsset(assetId);
+   979→            if (!asset) {
+   980→                console.log(`mock server: http put /api/lumo/v1/assets/${assetId} -> 404 Not Found`);
+   981→                return new HttpResponse(null, { status: 404 });
+   982→            }
+   983→
+   984→            // Update the asset
+   985→            if (body.Encrypted !== undefined) {
+   986→                asset.Encrypted = body.Encrypted;
+   987→            }
+   988→            mockDb.addAsset(asset);
+   989→
+   990→            // Return shallow asset in response (without Encrypted field)
+   991→            const { Encrypted, ...shallowAsset } = asset;
+   992→            const response = {
+   993→                Code: 1000,
+   994→                Asset: shallowAsset,
+   995→            };
+   996→            console.log(`mock server: http put /api/lumo/v1/assets/${assetId} ->`, response);
+   997→            return HttpResponse.json(response);
+   998→        }),
+   999→
+  1000→        http.delete('/api/lumo/v1/assets/:assetId', ({ params, request }) => {
+  1001→            const assetId = params.assetId as string;
+  1002→
+  1003→            // Check for injected error
+  1004→            const errorResponse = checkForError(`/api/lumo/v1/assets/${assetId}`, 'DELETE');
+  1005→            if (errorResponse) return errorResponse;
+  1006→
+  1007→            // Check for "undefined" parameter values
+  1008→            checkForUndefinedParams(request, params);
+  1009→
+  1010→            console.log(`mock server: http delete /api/lumo/v1/assets/${assetId}`);
+  1011→            const success = mockDb.deleteAsset(assetId);
+  1012→            console.log(
+  1013→                `mock server: http delete /api/lumo/v1/assets/${assetId} ->`,
+  1014→                success ? 'deleted' : 'not found'
+  1015→            );
+  1016→            if (!success) {
+  1017→                return new HttpResponse(null, { status: 404 });
+  1018→            }
+  1019→            return HttpResponse.json({
+  1020→                Code: 1000,
+  1021→            });
+  1022→        }),
+  1023→
+  1024→        http.get('/api/lumo/v1/messages/:messageId', ({ params, request }) => {
+  1025→            const messageId = params.messageId as string;
+  1026→
+  1027→            // Check for injected error
+  1028→            const errorResponse = checkForError(`/api/lumo/v1/messages/${messageId}`, 'GET');
+  1029→            if (errorResponse) return errorResponse;
+  1030→
+  1031→            // Check for "undefined" parameter values
+  1032→            checkForUndefinedParams(request, params);
+  1033→
+  1034→            console.log(`mock server: http get /api/lumo/v1/messages/${messageId}`);
+  1035→            const message = mockDb.getMessage(messageId);
+  1036→            console.log(`mock server: http get /api/lumo/v1/messages/${messageId} ->`, message);
+  1037→            if (!message) {
+  1038→                return new HttpResponse(null, { status: 404 });
+  1039→            }
+  1040→
+  1041→            // Return shallow message in response (without Encrypted field)
+  1042→            return HttpResponse.json({
+  1043→                Code: 1000,
+  1044→                Message: message,
+  1045→            });
+  1046→        }),
+  1047→
+  1048→        http.get('/api/lumo/v1/settings', () => {
+  1049→            const errorResponse = checkForError('/api/lumo/v1/settings', 'GET');
+  1050→            if (errorResponse) return errorResponse;
+  1051→
+  1052→            const settings = mockDb.getUserSettings();
+  1053→            console.log('mock server: http get /api/lumo/v1/settings ->', settings);
+  1054→            return HttpResponse.json({
+  1055→                Code: 1000,
+  1056→                ...(settings ? { UserSettings: settings } : {}),
+  1057→            });
+  1058→        }),
+  1059→
+  1060→        http.post('/api/lumo/v1/settings', async ({ request }) => {
+  1061→            const errorResponse = checkForError('/api/lumo/v1/settings', 'POST');
+  1062→            if (errorResponse) return errorResponse;
+  1063→
+  1064→            const body = (await request.json()) as UserSettingsRequest;
+  1065→            const now = new Date().toISOString();
+  1066→            const settings: MockDbUserSettings = {
+  1067→                UserSettingsTag: body.UserSettingsTag,
+  1068→                Encrypted: body.Encrypted,
+  1069→                CreateTime: now,
+  1070→                UpdateTime: now,
+  1071→            };
+  1072→            mockDb.setUserSettings(settings);
+  1073→            mockDb.recordLumoUserSettingsEvent(body.UserSettingsTag, ActionEventV6.Create);
+  1074→            console.log('mock server: http post /api/lumo/v1/settings ->', settings);
+  1075→            return HttpResponse.json({ Code: 1000 });
+  1076→        }),
+  1077→
+  1078→        http.put('/api/lumo/v1/settings', async ({ request }) => {
+  1079→            const errorResponse = checkForError('/api/lumo/v1/settings', 'PUT');
+  1080→            if (errorResponse) return errorResponse;
+  1081→
+  1082→            const body = (await request.json()) as UserSettingsRequest;
+  1083→            const existing = mockDb.getUserSettings();
+  1084→            const now = new Date().toISOString();
+  1085→            const settings: MockDbUserSettings = {
+  1086→                UserSettingsTag: body.UserSettingsTag,
+  1087→                Encrypted: body.Encrypted,
+  1088→                CreateTime: existing?.CreateTime ?? now,
+  1089→                UpdateTime: now,
+  1090→            };
+  1091→            mockDb.setUserSettings(settings);
+  1092→            mockDb.recordLumoUserSettingsEvent(body.UserSettingsTag, ActionEventV6.Update);
+  1093→            console.log('mock server: http put /api/lumo/v1/settings ->', settings);
+  1094→            return HttpResponse.json({ Code: 1000 });
+  1095→        }),
+  1096→    ];
+  1097→}
+  1098→
