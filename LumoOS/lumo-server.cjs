@@ -328,7 +328,7 @@ function restToolDescription(entry) {
 // Muted server ids (prompt-bar preference) skip the server BEFORE any connect
 // side effect. Returns null when MCP contributes nothing at all — the proxy
 // then stays a pure passthrough, byte-identical to the pre-MCP behavior.
-async function buildMcpChatLoop({ mutedServerIds, uid, isAdmin } = {}) {
+async function buildMcpChatLoop({ mutedServerIds, uid, isAdmin, conversationId } = {}) {
     const muted = Array.isArray(mutedServerIds) ? mutedServerIds : [];
     const cfg = readMcpConfig();
     const taken = new Set();
@@ -407,6 +407,7 @@ async function buildMcpChatLoop({ mutedServerIds, uid, isAdmin } = {}) {
         mutedServerIds: muted,
         uid: uid || '',
         isAdmin: isAdmin === true,
+        conversationId: typeof conversationId === 'string' ? conversationId : null,
         reqId: `mcp${Date.now().toString(36)}${++mcpReqCounter}`,
         hasControl: defsExist,
         baseUrl: '',
@@ -2069,6 +2070,7 @@ async function runMcpChatLoop({ req, res, bodyObj, upstreamUrl, forwardHeaders, 
         uid: loop.uid,
         status: 'running',
         model: String(bodyObj && bodyObj.model ? bodyObj.model : ''),
+        conversationId: loop.conversationId || null,
         startedAt: nowIso(),
         finishedAt: null,
         rounds: 0,
@@ -2383,6 +2385,18 @@ async function handleByokProxy(req, res) {
             delete bodyObj.zap_mcp;
             raw = Buffer.from(JSON.stringify(bodyObj), 'utf8');
         }
+        // zap_conv_id: opt-in conversation attribution from the client, so a
+        // durable run can link back to the chat it belonged to. Id only —
+        // message content stays end-to-end encrypted. Validate, capture,
+        // strip before any provider call.
+        let zapConvId = null;
+        if (bodyObj && bodyObj.zap_conv_id !== undefined) {
+            if (typeof bodyObj.zap_conv_id === 'string' && bodyObj.zap_conv_id.length > 0 && bodyObj.zap_conv_id.length <= 80) {
+                zapConvId = bodyObj.zap_conv_id;
+            }
+            delete bodyObj.zap_conv_id;
+            raw = Buffer.from(JSON.stringify(bodyObj), 'utf8');
+        }
         const asked = bodyObj && typeof bodyObj.model === 'string' ? bodyObj.model.trim() : '';
         const rawTarget = req.headers['x-byok-target'];
         let target = Array.isArray(rawTarget) ? rawTarget[0] : rawTarget;
@@ -2481,7 +2495,7 @@ async function handleByokProxy(req, res) {
         // (stream:false) and /models or health calls never see tools.
         const isStreamChat = !!(bodyObj && Array.isArray(bodyObj.messages) && bodyObj.stream === true);
         if (isStreamChat) {
-            const loop = await buildMcpChatLoop({ mutedServerIds, uid: who.entry.uid, isAdmin: who.entry.role === 'admin' });
+            const loop = await buildMcpChatLoop({ mutedServerIds, uid: who.entry.uid, isAdmin: who.entry.role === 'admin', conversationId: zapConvId });
             if (loop) {
                 loop.baseUrl = `http://${req.headers.host || `127.0.0.1:${PORT}`}`;
                 logReq(req.method, `mcp ${upstreamUrl}`, 200, `[${loop.reqId}] tools=${loop.tools.length} muted=${loop.mutedServerIds.length} (model=${asked})`);
@@ -2826,6 +2840,42 @@ async function routeRequest(req, res) {
 
     // ── MCP connection authorization pages (browser-facing, no session) ──────
     // Security: both endpoints act only on one-time, expiring flow tokens the
+    // ── Agent runs timeline (browser-facing, session-authenticated) ───────────
+    // Server-rendered view of the durable runs + audit trail. Same theme
+    // tokens as the /mcp pages; no message content exists in these records.
+    if (url === '/runs' || url.startsWith('/runs/')) {
+        const who = activeUserForUid(uidFromReq(req));
+        if (!who) {
+            res.writeHead(302, { Location: '/login' });
+            return res.end();
+        }
+        const isAdmin = who.entry.role === 'admin';
+        const runsPage = (title, inner) => send(res, 200, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · Lumo</title><style>:root{color-scheme:dark light}body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#16141c;color:#fff;margin:0;padding:24px;box-sizing:border-box}main{max-width:960px;margin:0 auto}h1{font-size:18px;font-weight:600;margin:0 0 4px}p.sub{color:#a7a4b5;font-size:13px;margin:0 0 18px}table{width:100%;border-collapse:collapse;font-size:13px;background:#292733;border:1px solid #343140;border-radius:12px;overflow:hidden}th{ text-align:left;color:#a7a4b5;font-weight:600;padding:10px 12px;border-bottom:1px solid #343140}td{padding:10px 12px;border-bottom:1px solid #34314055;vertical-align:top}tr:last-child td{border-bottom:0}a{color:#9d84ff;text-decoration:none}a:hover{text-decoration:underline}.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600}.completed{background:#1ea88522;color:#1ea885}.running{background:#6d4aff22;color:#9d84ff}.failed{background:#f5385a22;color:#f5385a}.aborted{background:#a7a4b522;color:#a7a4b5}.muted{color:#a7a4b5}.back{font-size:13px;color:#9d84ff;text-decoration:none;display:inline-block;margin-bottom:14px}code{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#c9c6dd;word-break:break-all}@media (prefers-color-scheme:light){body{background:#fbf9fe;color:#2b2442}table{background:#fff;border-color:#e3dffa}th{border-color:#e3dffa;color:#52527a}td{border-color:#e3dffa88}.muted{color:#52527a}code{color:#463d6b}}</style></head><body><main>${inner}</main></body></html>`, { 'Content-Type': 'text/html; charset=utf-8' });
+        const badge = (s) => `<span class="badge ${escapeHtml(s)}">${escapeHtml(s)}</span>`;
+        const dur = (r) => (r.startedAt && r.finishedAt ? `${Math.max(1, Math.round((Date.parse(r.finishedAt) - Date.parse(r.startedAt)) / 100) / 10)}s` : '—');
+
+        if (url === '/runs') {
+            const runs = isAdmin ? store.listAllRuns(100) : store.listRuns(who.entry.uid, 100);
+            const rows = runs.map((r) => `<tr><td><a href="/runs/${encodeURIComponent(r.id)}"><code>${escapeHtml(r.id.slice(0, 14))}…</code></a></td><td>${badge(r.status)}</td><td class="muted">${escapeHtml(r.model || '')}</td><td class="muted">${r.conversationId ? `<code>${escapeHtml(String(r.conversationId).slice(0, 18))}</code>` : '—'}</td><td class="muted">${escapeHtml(String(r.startedAt || ''))}</td><td class="muted">${dur(r)}</td><td class="muted">${r.toolCalls ?? 0}</td></tr>`).join('');
+            const body = `<h1>Agent runs</h1><p class="sub">${isAdmin ? 'All users' : 'Your'} agent runs — status and the full tool audit trail. Message content is never recorded.</p>${runs.length ? `<table><tr><th>run</th><th>status</th><th>model</th><th>conversation</th><th>started</th><th>duration</th><th>tools</th></tr>${rows}</table>` : '<p class="sub">No runs yet — they appear here after the agent uses a tool in a chat.</p>'}`;
+            return runsPage('Agent runs', body);
+        }
+
+        const runMatch = url.match(/^\/runs\/([A-Za-z0-9_-]+)$/);
+        if (runMatch) {
+            const run = store.getRun(runMatch[1]);
+            if (!run) return send(res, 404, notFound());
+            if (run.uid !== who.entry.uid && !isAdmin) return send(res, 403, 'Forbidden', { 'Content-Type': 'text/plain' });
+            const events = store.listRunEvents(run.id);
+            const evRows = events.map((e) => {
+                const detail = e.detail && typeof e.detail === 'object' ? `${escapeHtml(e.detail.method || '')} ${escapeHtml(e.detail.path || '')}` : '';
+                return `<tr><td class="muted">${escapeHtml(String(e.createdAt || ''))}</td><td><code>${escapeHtml(e.type)}</code></td><td><code>${escapeHtml(e.tool || '')}</code></td><td class="muted">${detail}</td><td class="muted">${e.durationMs != null ? `${e.durationMs}ms` : ''}</td><td>${e.errorCode ? `<code>${escapeHtml(String(e.errorCode).slice(0, 120))}</code>` : ''}</td></tr>`;
+            }).join('');
+            const body = `<a class="back" href="/runs">← All runs</a><h1>Run <code>${escapeHtml(run.id)}</code></h1><p class="sub">${badge(run.status)} · model <code>${escapeHtml(run.model || '')}</code>${run.conversationId ? ` · conversation <code>${escapeHtml(String(run.conversationId).slice(0, 24))}</code>` : ''} · started ${escapeHtml(String(run.startedAt || ''))} · ${run.toolCalls ?? 0} tool calls${run.error ? ` · <span class="err">${escapeHtml(run.error)}</span>` : ''}</p><h1 style="font-size:14px;margin-top:22px">Event trail</h1>${events.length ? `<table><tr><th>time</th><th>event</th><th>tool</th><th>detail</th><th>duration</th><th>error</th></tr>${evRows}</table>` : '<p class="sub">No tool events were recorded for this run.</p>'}`;
+            return runsPage(`Run ${run.id.slice(0, 12)}`, body);
+        }
+    }
+
     // server issued via the control plane; credentials are POSTed directly to
     // this server (never through chat) and stored encrypted.
     if (url.startsWith('/mcp/')) {

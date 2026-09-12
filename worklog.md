@@ -1,5 +1,20 @@
 
 ---
+Task ID: runs-ui-phase3
+Agent: ZCode (main)
+Task: Agent runs UI + conversation attribution (Agent OS phase 3 — spec §10 observability)
+
+Work Log:
+- Server: zap_conv_id body field (validate/capture/strip, exact zap_mcp treatment) → runDoc.conversationId; browser-facing /runs (list) + /runs/<id> (event trail) pages, session-authenticated, owner-or-admin, same dark theme tokens as the /mcp pages, no message content by design.
+- New LumoOS/patch-runs-ui.cjs (STATIC pointed at THIS tree — other patch scripts hardcode the stale ProtoLumo path): (1) body builder in 1306/4124 sends zap_conv_id from window.__zapConvId beside zap_mcp; (2) the 1230.* chat-send thunks set window.__zapConvId from the in-scope conversationId (identifier `u`, verified per-variant; d224e6ae variant has no BYOK branch — skipped) — first attempt used an unbalanced brace and failed the new Function gate, fixed with a comma-expression return; (3) Settings modal gained an "Agent runs" nav entry + switch case + panel (fetches /api/lumo/v1/runs, links each run to /runs/<id>), cloned from fix-admin-ui-split.cjs.
+- bust-cache-admin.cjs + diag-all-runtime-integrity.cjs: paths repointed ProtoLumo → this tree; VERSION bumped v=40→v=41. diag: 1272 (runtime, chunk) pairs checked, 0 mismatches — the SRI lesson from the white-screen incident is now a hard gate.
+- tests/durable-runs.test.cjs extended to 27 checks: conversation attribution stored (and absent when the field is omitted), /runs page renders for owner (run id present) and redirects unauthenticated → /login, foreign user denied detail (403), secret never rendered.
+- Live E2E in the real UI: app boots clean after the SRI re-bust; a chat sent from a real conversation produced a run attributed to that conversation (verified in the DB + /runs pages); the agent made REAL authenticated Plane API calls (audit trail: GET /api/v1/workspaces/ → 404 Page-not-found, then correctly probed /api/v1/users/me and /api/v1/workspaces/itsmijsu.dev → "Workspace not found" — the recovery ladder's alternate-path behavior working); stale failed duplicate connection (rest-2b0e2de1, setup never completed) deleted; plane def description updated: this Plane plan has no workspace-list endpoint, the slug must come from the user's Plane URL.
+- Settings → Agent runs panel verified live: lists runs (status/model/conversation/tools/started) with /runs/<id> links.
+
+Result: PHASE 3 COMPLETE — runs are observable end-to-end (APIs + in-app panel + timeline pages) and attributed to conversations. Known notes: nemotron-lightning burned all 5 tool rounds exploring instead of answering (model-quality tunable; stronger models answer within budget); the Plane workspace slug needs to be supplied by the user once. Still open for later phases: pause/resume state machine, tool factory/sandbox, multi-agent delegation, run replay.
+
+---
 Task ID: durable-runs-phase2
 Agent: ZCode (main)
 Task: Durable agent runs + tool audit trail + write-approval gates (Agent OS phase 2)

@@ -1,7 +1,7 @@
 // Check integrity for every (runtime, chunk) pair across ALL runtimes.
 const fs = require('fs');
 const crypto = require('crypto');
-const dir = 'D:/ProtoLumo/WebClients/applications/lumo/dist/assets/static';
+const dir = 'D:/LumoOSv1.3/LumoOS/lumo-dist/assets/static';
 const sri = (buf) => 'sha384-' + crypto.createHash('sha384').update(buf).digest('base64');
 
 const runtimeFiles = fs.readdirSync(dir).filter(f => /^runtime\.[a-f0-9]+\.js$/.test(f));

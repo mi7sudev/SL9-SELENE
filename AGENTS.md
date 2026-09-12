@@ -102,6 +102,13 @@ The agent can call external REST APIs through governed connections:
   stored (messages are end-to-end encrypted by design). APIs:
   `GET /api/lumo/v1/runs`, `GET /api/lumo/v1/runs/:id`,
   `GET /api/lumo/v1/admin/runs`.
+- **Runs are visible in the app** — Settings → "Agent runs" lists your runs
+  and links to the server-rendered timeline at `/runs` (list) and
+  `/runs/<id>` (full event trail). Chats carry their conversation id
+  (`zap_conv_id`) so runs are attributed to the chat they belonged to.
+- **After any dist-affecting change**: run `node bust-cache-admin.cjs` and
+  `node diag-all-runtime-integrity.cjs` — 0 mismatches is required (the SPA
+  carries SRI hashes; a stale hash white-screens the app).
 
 ## Verification checklist (for agents)
 

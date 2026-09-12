@@ -5,9 +5,9 @@
 const fs = require('fs');
 const crypto = require('crypto');
 
-const STATIC = 'D:/ProtoLumo/WebClients/applications/lumo/dist/assets/static';
-const DIST = 'D:/ProtoLumo/WebClients/applications/lumo/dist';
-const VERSION = 'v=40';
+const STATIC = 'D:/LumoOSv1.3/LumoOS/lumo-dist/assets/static';
+const DIST = 'D:/LumoOSv1.3/LumoOS/lumo-dist';
+const VERSION = 'v=41';
 const sri = (buf) => 'sha384-' + crypto.createHash('sha384').update(buf).digest('base64');
 
 const PREFIXES = ['4206', '1306', '4124', '1230'];

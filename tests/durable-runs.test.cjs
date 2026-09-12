@@ -82,11 +82,13 @@ function listen(server) {
     return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
-async function chat(cookie, model) {
+async function chat(cookie, model, conversationId) {
+    const body = { model, stream: true, messages: [{ role: 'user', content: 'Create a workspace' }] };
+    if (conversationId) body.zap_conv_id = conversationId;
     return fetch(`${BASE}/byok-api/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', cookie },
-        body: JSON.stringify({ model, stream: true, messages: [{ role: 'user', content: 'Create a workspace' }] }),
+        body: JSON.stringify(body),
     });
 }
 function zapFrames(text) {
@@ -153,7 +155,7 @@ function zapFrames(text) {
         });
 
         // ── chat 1: gated write → approval → confirmed execution ──
-        const c1 = await chat(cookie, 'stub-model');
+        const c1 = await chat(cookie, 'stub-model', 'conv-test-123');
         const t1 = await c1.text();
         const z1 = zapFrames(t1);
         const gateFrame = z1.find((z) => z.status === 'done' && z.result && z.result.includes('needsConfirmation'));
@@ -176,7 +178,10 @@ function zapFrames(text) {
 
         // newest run is chat 2 (confirmWrites:false — no approval events);
         // the gated approval trail lives in the oldest run (chat 1)
-        const runId = list.Runs[list.Runs.length - 1].id;
+        const oldest = list.Runs[list.Runs.length - 1];
+        check('conversation attribution stored', oldest.conversationId === 'conv-test-123', oldest.conversationId);
+        check('chat without zap_conv_id has none', list.Runs[0].conversationId === null, list.Runs[0].conversationId);
+        const runId = oldest.id;
         const detail = await bodyOf(await fetch(`${BASE}/api/lumo/v1/runs/${runId}`, { headers: { cookie } }));
         const types = (detail.Events || []).map((e) => e.type);
         check('run detail has event trail', Array.isArray(detail.Events) && detail.Events.length > 0, detail);
@@ -199,6 +204,19 @@ function zapFrames(text) {
         // admin sees all runs
         const all = await bodyOf(await fetch(`${BASE}/api/lumo/v1/admin/runs`, { headers: { cookie } }));
         check('admin run list works', Array.isArray(all.Runs) && all.Runs.length === 2, all);
+
+        // ── server-rendered runs timeline pages ──
+        const page = await fetch(`${BASE}/runs`, { headers: { cookie }, redirect: 'manual' });
+        const pageText = await page.text();
+        check('runs page renders for owner', page.status === 200 && pageText.includes(runId.slice(0, 14)), page.status);
+        const runPage = await fetch(`${BASE}/runs/${runId}`, { headers: { cookie }, redirect: 'manual' });
+        const runPageText = await runPage.text();
+        check('run detail page renders event trail', runPage.status === 200 && runPageText.includes('approval_requested') && runPageText.includes('approval_granted'), runPage.status);
+        check('detail page never shows the secret', !runPageText.includes(SECRET));
+        const unauth = await fetch(`${BASE}/runs`, { redirect: 'manual' });
+        check('runs page redirects unauthenticated', unauth.status === 302 && (unauth.headers.get('location') || '').includes('/login'), unauth.status);
+        const foreignPage = await fetch(`${BASE}/runs/${runId}`, { headers: { cookie: cookie2 }, redirect: 'manual' });
+        check('run detail page denied for foreign user', foreignPage.status === 403, foreignPage.status);
     } catch (e) {
         failed++;
         console.error('FATAL:', e && e.stack || e);
