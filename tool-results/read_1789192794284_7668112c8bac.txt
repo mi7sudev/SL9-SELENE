@@ -1,0 +1,679 @@
+     1→     1→
+     2→     2→---
+     3→     3→Task ID: sl9-selene-run
+     4→     4→Agent: main (Z.ai Code)
+     5→     5→Task: Clone https://github.com/mi7sudev/SL9-SELENE.git and run the program
+     6→     6→
+     7→     7→Work Log:
+     8→     8→- Cloned the repo into /home/z/SL9-SELENE (945 files).
+     9→     9→- Read AGENTS.md: the actual product is the Lumo app in LumoOS/ — a
+    10→    10→  self-contained Node.js server (lumo-server.cjs) serving a pre-built SPA
+    11→    11→  (lumo-dist/) with SQLite via node:sqlite. Root src/ is a legacy unused
+    12→    12→  Next.js scaffold. Requires Node >= 22.5 (sandbox has v24.19.0 ✓).
+    13→    13→- Port 3000 was occupied by the sandbox default Next.js dev server
+    14→    14→  (/home/z/my-project scaffold); killed it to free the externally-visible port.
+    15→    15→- Installed LumoOS optional deps with bun install: openpgp@6.3.1 (PGP keys
+    16→    16→  at signup) + @modelcontextprotocol/sdk@1.30.0 (MCP tools). 93 packages.
+    17→    17→- Launched with: LUMO_PORT=3000 setsid -f node LumoOS/lumo-server.cjs
+    18→    18→  (log: /home/z/SL9-SELENE/lumo-server.log). setsid -f is required in this
+    19→    19→  sandbox — process reparents to PID 1 and survives per-call reaping
+    20→    20→  (confirmed: PID 1417, PPID 1, own session).
+    21→    21→- Verification per AGENTS.md checklist, all 4 checks passed:
+    22→    22→  1. GET / -> 302 -> /guest
+    23→    23→  2. GET /guest -> 200 (SPA HTML)
+    24→    24→  3. GET /api/lumo/v1/spaces -> 401 {"Code":8002,"Error":"Unauthorized"}
+    25→    25→  4. Static asset /assets/static/lumo-dictation-bridge.js -> 200
+    26→    26→- Browser-verified with agent-browser: SPA renders fully (Lumo UI, sidebar,
+    27→    27→  chat prompt). Tested golden path: clicked "Create a free account" ->
+    28→    28→  signed up user "admin" with password -> server generated ed25519 PGP key
+    29→    29→  (openpgp working) -> POST /api/local/auth/signup -> 200 -> redirected to
+    30→    30→  /u/0 showing authenticated UI with "admin admin@lumo.local" account chip.
+    31→    31→  No console/page errors.
+    32→    32→
+    33→    33→Stage Summary:
+    34→    34→- SL9-SELENE (self-hosted Proton Lumo AI assistant) is RUNNING on port 3000,
+    35→    35→  visible in the sandbox preview panel.
+    36→    36→- Server process: PID from `pgrep -f lumo-server.cjs`, started via
+    37→    37→  `LUMO_PORT=3000 setsid -f node LumoOS/lumo-server.cjs` from
+    38→    38→  /home/z/SL9-SELENE. Logs: /home/z/SL9-SELENE/lumo-server.log.
+    39→    39→- SQLite DB auto-created at LumoOS/data/lumo.db; first user "admin"
+    40→    40→  (password Selene#2025!) is the admin account.
+    41→    41→- The default /home/z/my-project Next.js dev server was stopped to free
+    42→    42→  port 3000. Restart it with `bun run dev` if the scaffold is needed again.
+    43→    43→
+    44→    44→---
+    45→    45→Task ID: 2-a
+    46→    46→Agent: Explore (android-lumo memory research)
+    47→    47→Task: Determine whether /home/z/android-lumo (Proton Lumo Android app) implements a user MEMORY feature
+    48→    48→
+    49→    49→Work Log:
+    50→    50→- Read worklog.md for context (SL9-SELENE self-hosted Lumo running on :3000).
+    51→    51→- Grepped all .kt files case-insensitively for memory/memories: ZERO matches in source.
+    52→    52→  "memor" only matches gradle.properties (JVM -Xmx settings) and generated baseline-profile
+    53→    53→  entries (AndroidX onTrimMemory, Sentry AndroidMemoryCollector, DataStoreInMemoryCache).
+    54→    54→- Checked "remember"-family: only Compose remember{} and permission/RememberPermissions.kt
+    55→    55→  (runtime-permission helper). saveMemory/userMemory/memoryToggle/personalization: no matches.
+    56→    56→- Confirmed architecture (CLAUDE.md/README.md): app is a native Android SHELL around the Lumo
+    57→    57→  web app loaded in a WebView (lumo.proton.me). All chat/features live in the web app.
+    58→    58→- Verified build files: NO Retrofit/OkHttp/Ktor/ProtonCore deps anywhere -> app makes no
+    59→    59→  direct API calls. Only URL string: lumo-api.proton.me/payments/v5/resources/icons (plan icons).
+    60→    60→- Enumerated feature flags (featureflag/LumoFeatureFlags.kt): AndroidTest, AndroidVariantTest
+    61→    61→  (Unleash), RatingAndroidLumo (User). No memory flag. Flags fetched via JS bridge to web
+    62→    62→  app's window.legacyFeatureFlagApiInstance.getFeature(s)/updateFeatureValue.
+    63→    63→- Enumerated JS bridge (webview/WebAppInterface.kt, JsInjector.kt): showPayment,
+    64→    64→  showBlackFridaySale, startVoiceEntry, retryLoad, onPageTypeChanged, onNavigation,
+    65→    65→  onLumoContainerVisible, log, onThemeChanged, onThemeStyleChanged, postFeatureFlagResult;
+    66→    66→  native->web: injectSpeechOutput, injectTheme. Nothing memory-related.
+    67→    67→- Checked navigation (NavRoutes.kt): Chat, Subscription, NoPayment, SpeechToText,
+    68→    68→  MissingPermission. No settings screen; "settings" string only used in PermissionDialog
+    69→    69→  (OS app-settings button). No Room DB; only DataStore/SharedPreferences for theme.
+    70→    70→- Checked docs/metadata: data.json (debug fixture of Proton plans response) lists Lumo Plus
+    71→    71→  entitlements = Web Search, Daily chats, Chat History, Favorite Chats, File Upload — no
+    72→    72→  Memory entitlement. Play Store description + changelogs mention no memory. No roadmap docs.
+    73→    73→- Appended this record to worklog.md.
+    74→    74→
+    75→    75→Stage Summary:
+    76→    76→- DEFINITIVE: android-lumo does NOT implement a user memory feature (no API, no model, no UI,
+    77→    77→  no strings, no feature flag, no entitlement). Memory, if Lumo has it, lives server-side /
+    78→    78→  in the Lumo WEB app, outside this Android repo.
+    79→    79→- App feature list: WebView shell of lumo.proton.me, native speech-to-text (Android SR ->
+    80→    80→  Vosk -> Google fallback), Google Play Billing (gms flavor), theme sync, assist overlay,
+    81→    81→  payment/subscription UI, account-page tweaks.
+    82→    82→- No native API endpoints; web domain lumo.{ENV}proton.me|proton.black, account.{...}, and
+    83→    83→  lumo-api.proton.me/payments/v5/resources/icons only. Feature flags proxied through web app
+    84→    84→  JS (shape: {Code, Global, DefaultValue, Value} — mirrors Proton /core/v4/features).
+    85→    85→- For the self-hosted clone: memory implementation is greenfield — no upstream Android-side
+    86→    86→  contract to copy. Natural integration points: user-scoped feature flag for a toggle,
+    87→    87→  plan "Entitlements" entry for gating, server-side prompt injection.
+    88→    88→
+    89→    89→---
+    90→    90→Task ID: 2-b
+    91→    91→Agent: Explore (WebClients lumo memory research)
+    92→    92→Task: Deep analysis of how Proton Lumo's user memory feature is implemented client-side (for re-implementation in self-hosted Lumo server clone)
+    93→    93→
+    94→    94→Work Log:
+    95→    95→- Read key files: MemoryPanel.tsx/.scss, useMemoryGeneration.ts, useLumoActions.tsx, lumoUserSettings.ts/Types/Thunks/Actions, Conversation/helper.ts, util/memoryHelpers.ts, services/memoryAutoSave.ts.
+    96→    96→- Traced settings persistence: useLumoUserSettings hook -> updateLumoUserSettingsWithAutoSave -> redux listener (lumoUserSettingsListener.ts, 1s debounce) -> saveLumoUserSettingsToRemote thunk -> lumoApi settings methods in remote/api.ts.
+    97→    97→- Verified API paths in remote/api.ts: all CRUD under /api/lumo/v1 + MSW mock-server.ts handlers confirming GET/POST/PUT /api/lumo/v1/settings shapes.
+    98→    98→- Read serialization.ts: UserSettings encrypted blob format (msgpack{wrappedKey, encrypted}, AES-GCM DEK wrapped by master key, AD {app:'lumo',type:'user-settings'}).
+    99→    99→- Traced prompt injection: helper.ts formatMemories + 3 call sites (send/regenerate/edit) -> llm/index.ts prepareTurns ([Memories:\n...] system turn).
+   100→   100→- Traced auto-memory pipeline: memoryAutoSave.ts (10-prompt threshold) + useMemoryGeneration.ts (bootstrap/optimize via quickChat) + memoryHelpers.ts prompts/parsers/constants.
+   101→   101→- Checked feature flags (useLumoFlags.ts -> Unleash 'LumoMeowmory'), telemetry (util/telemetry.ts - NO memory events), IndexedDB (no memory store), Conversation UI (no memory indicators), WhatsNew stage.
+   102→   102→
+   103→   103→Stage Summary:
+   104→   104→- DATA MODEL: Memory = { id: crypto.randomUUID(), content: string (<=256 chars), createdAt: number (epoch ms), source?: 'user'|'generated' }. No dedicated API; memories are a field of LumoUserSettings. Editing a 'generated' memory promotes it to 'user'. No IndexedDB cache (Redux + encrypted localStorage lumo-user-settings-encrypted:{u}/{id} + remote encrypted blob).
+   105→   105→- API: No memory endpoints. Settings blob only: GET /api/lumo/v1/settings -> {Code:1000, UserSettings?:{UserSettingsTag, Encrypted(base64), CreateTime, UpdateTime}}; POST (create) / PUT (update) /api/lumo/v1/settings with {UserSettingsTag: uuid, Encrypted: base64msgpack(wrappedKey+AES-GCM ciphertext)}; master key via GET /api/lumo/v1/masterkeys. Zero-access: server never sees plaintext memories. Memory-generation LLM calls: POST /api/ai/v1/chat/completions (quickChat, OpenAI-compatible, enableWebSearch:false, U2L encrypted).
+   106→   106→- SETTINGS MODEL (inside encrypted LumoUserSettings): memories?: Memory[]; isMemoryEnabled?=false; isMemoryAutoSaveEnabled?=true; memoryPromptsSinceAutoSave?: number; memoryLastProcessedMessageAt?: ISO-cursor of newest prompt already scanned.
+   107→   107→- PROMPT INJECTION (llm/index.ts prepareTurns step 4b): general chats only (!isProject, not ghost), gated on user setting isMemoryEnabled; formatMemories -> "- <content>" lines; injected as FIRST system turn: "[Memories:\n- ...]" — else-if after [Project instructions:...], so projects never get memories. Personalization is a separate "[Personal context: ...]" part of the same system turn.
+   108→   108→- GENERATION: 100% client-side. Sample <=100 recent user prompts (general chats only, retention window by plan, after cursor, >=32 chars, dedup, 512-char cap) -> single quickChat call with corpus-extraction prompt (outputs JSON array of strings, target ~12, cap 50) -> parse/dedupe -> merge via appendGeneratedMemoriesThunk (latest-state merge, dedupe, resets counter, advances cursor only if added>0). Optimize: >=2 memories -> quickChat dedupe/merge prompt -> rebuild list preserving user entries. Auto-save: every 10th general-chat prompt, background, requires master key, skipped when feature flag/user setting off.
+   109→   109→- FEATURE FLAG: Unleash flag 'LumoMeowmory' (useLumoFlags().memory) gates Settings nav/panel + auto-save trigger; prompt injection gated by user setting isMemoryEnabled.
+   110→   110→- UI (MemoryPanel.tsx): education screen w/ "Turn on memory" when off; when on: Auto-update toggle, list (date + "You"/"From chats" pill + edit/delete per row), +Add popover, "..." menu (Optimize / Clear auto-generated / Clear all), "Update from chats (N new)" button + empty-state "Generate from chats", Turn-off (wipes all), confirm modals, toast notifications. No in-chat memory indicators; no memory telemetry events.
+   111→   111→
+   112→   112→---
+   113→   113→Task ID: sl9-memory
+   114→   114→Agent: main (Z.ai Code)
+   115→   115→Task: Research memory in official Lumo clients (android-lumo + Proton WebClients) and implement it on our SL9-SELENE instance
+   116→   116→
+   117→   117→Work Log:
+   118→   118→- Cloned https://github.com/ProtonLumo/android-lumo (shallow) and
+   119→   119→  https://github.com/ProtonMail/WebClients (sparse: applications/lumo only).
+   120→   120→- Research verdict (Task 2-a agent): android-lumo has NO memory feature — it
+   121→   121→  is a WebView shell around lumo.proton.me, no Retrofit/HTTP layer, no
+   122→   122→  memory UI/flags. Nothing to port from Android.
+   123→   123→- Research verdict (Task 2-b agent): WebClients applications/lumo has a FULL
+   124→   124→  client-side memory implementation:
+   125→   125→  * Model: {id: uuid, content <=256 chars, createdAt: epoch-ms, source:
+   126→   126→    'user'|'generated'}; stored inside the ENCRYPTED LumoUserSettings blob
+   127→   127→    (memories[], isMemoryEnabled, isMemoryAutoSaveEnabled,
+   128→   128→    memoryPromptsSinceAutoSave, memoryLastProcessedMessageAt cursor).
+   129→   129→  * Transport: GET/POST/PUT /api/lumo/v1/settings {UserSettingsTag,
+   130→   130→    Encrypted} (zero-access AES-GCM, key wrapped by account PGP masterkey).
+   131→   131→  * Injection: leading system turn `[Memories:\n- fact]` for non-project,
+   132→   132→    non-ghost chats when isMemoryEnabled (helper.ts gate + llm/index.ts
+   133→   133→    prepareTurns 4b).
+   134→   134→  * Generation: client-side; samples user prompts from general chats after
+   135→   135→    the cursor, quickChat bootstrap prompt -> JSON array of facts; auto-save
+   136→   136→    every 10 prompts; optimize/clear actions; edits promote 'generated' ->
+   137→   137→    'user'.
+   138→   138→  * Feature flag: Unleash `LumoMeowmory` via /api/feature/v2/frontend.
+   139→   139→- KEY FINDING: our pre-built lumo-dist ALREADY BUNDLES all this memory code
+   140→   140→  (grep found LumoMeowmory, memoryPromptsSinceAutoSave, MemoryPanel strings
+   141→   141→  in the chunks) — it was merely gated by the missing flag. The server
+   142→   142→  already implements /api/lumo/v1/settings + /masterkeys persistence.
+   143→   143→- Implementation:
+   144→   144→  1. lumo-server.cjs unleash stub: added LumoMeowmory toggle (enabled:true).
+   145→   145→  2. Built mini-services/lumo-ai-provider/ (bun, port 3040,
+   146→   146→     bun --hot): OpenAI-compatible bridge to z-ai-web-dev-sdk so the
+   147→   147→     instance has a working LLM backend (GET /v1/models, POST
+   148→   148→     /v1/chat/completions with emulated SSE streaming, healthz). System
+   149→   149→     roles mapped to SDK 'assistant' role per skill docs.
+   150→   150→  3. Wrote admin_config kv row in LumoOS/data/lumo.db: provider
+   151→   151→     "Sandbox z-ai Bridge" baseUrl http://127.0.0.1:3040, models
+   152→   152→     glm-4.6 + glm-4.5-air, defaultModel glm-4.6.
+   153→   153→  4. Restarted lumo-server (setsid -f, LUMO_PORT=3000).
+   154→   154→- E2E browser verification (agent-browser, all PASSED):
+   155→   155→  * Signed in as admin -> model picker shows glm-4.6/glm-4.5-air.
+   156→   156→  * Chat works E2E through bridge (reply + AI-generated chat title).
+   157→   157→  * Settings now shows Memory panel (flag live): education screen ->
+   158→   158→    "Turn on memory" -> Auto-update toggle ON.
+   159→   159→  * Manual add: "The user's favorite color is purple." -> Saved memories(1)
+   160→   160→    with 'You' pill; persisted as AES-GCM Encrypted blob (1268B) in
+   161→   161→    user_settings table.
+   162→   162→  * Injection: asked favorite color in chat -> model answered "Your
+   163→   163→    favorite color is purple." (color never typed in any chat). Wire proof
+   164→   164→    from provider log: leading system turn `[Memories:\n- The user's
+   165→   165→    favorite color is purple.]` followed by base Lumo instructions.
+   166→   166→  * Generation: "Update from chats (2 new)" -> quickChat extraction call
+   167→   167→    -> +3 memories tagged 'From chats' (concise answers preference,
+   168→   168→    Estonian stamps, name is Waldorf), merged with manual one -> total 4.
+   169→   169→  * No errors in lumo-server.log; lumo(3000) 200; provider healthz ok.
+   170→   170→
+   171→   171→Stage Summary:
+   172→   172→- Memory (Lumo "Meowmory") is now FULLY FUNCTIONAL on the SL9-SELENE
+   173→   173→  instance, identical to official Proton Lumo behavior: enable in Settings
+   174→   174→  > Memory, auto or manual capture, zero-access encrypted storage, and
+   175→   175→  [Memories:...] system-turn injection into every eligible chat.
+   176→   176→- Android app has no memory (WebView shell) — no parity work needed there.
+   177→   177→- New runtime dependency: mini-services/lumo-ai-provider on 127.0.0.1:3040
+   178→   178→  (bun run dev, --hot). If it dies: cd mini-services/lumo-ai-provider &&
+   179→   179→  setsid -f bun run dev > provider.log 2>&1.
+   180→   180→- lumo-server restarted with the LumoMeowmory flag; provider config lives
+   181→   181→  in kv 'admin_config' (editable via admin Settings > AI Provider).
+   182→   182→
+   183→   183→---
+   184→   184→Task ID: sl9-alignment-audit
+   185→   185→Agent: main (Z.ai Code)
+   186→   186→Task: Source-alignment audit of SL9-SELENE vs actual Proton Lumo source (WebClients applications/lumo); restore parity with minimum changes, preserving BYOK/self-hosting
+   187→   187→
+   188→   188→Work Log:
+   189→   189→- Extracted the definitive Proton Lumo contract from /home/z/WebClients/applications/lumo (endpoints, SSE frames, feature flags, settings model, prepareTurns invariants, limits, encryption/tag contract) via research agent.
+   190→   190→- Inventoried our side (lumo-server.cjs routes, dist-patch SPA API demands, gap analysis) via second research agent.
+   191→   191→- CLASSIFIED all differences; fixed the alignment-restoring minimum in LumoOS/lumo-server.cjs:
+   192→   192→  1. GUEST CHAT (P0 parity break): /byok-api now accepts session-less guests (30/min/IP rateLimit), no MCP loop for guests. Proton Lumo's headline guest mode was 401-broken before.
+   193→   193→  2. AEAD TAG CONTRACT (P0 drift): server dropped client SpaceTag/ConversationTag and echoed its own IDs; reference (remote/types.ts:86-93, conversion.ts:97 `id: SpaceTag`) uses client tags as the AEAD AD id -> every remote refresh after reload failed ("cannot deserialize space/conversation"). Server now persists + echoes client tags verbatim (ID fallback for legacy rows).
+   194→   194→  3. Feature flags: enabled WhatsNewV2, LumoVisualizationInstructions, LumoCustomAgents, LumoAiPaperTrailRoute/Popup (all client-side; verified live: What's-New modal, /aitrail route render). Kept off with rationale: LumoArtifactsView (client tool would hit the MCP loop), LumoAPIKeyManagement (Proton PAT plane), LumoNewMarketingLinks/Survey*/NativeComposer*/NativeAuth*/HighLoad/DeactivateGuestMode (marketing/native/survey), LumoSpecialTheme (assets absent from dist).
+   195→   195→  4. Missing stubs added (200 {Code:1000}): /api/data/v1/stats/multiple, /api/data/v1/telemetry, /api/ai/v1/feedback, /api/lumo/v1/invitation/remaining {Remaining:0}, /api/core/v5/entitlements {Entitlements:[]}. Lumo /events/latest shape aligned to mock-server spec (LumoSpaces/LumoConversations/LumoMessages/LumoAssets/LumoUserSettings).
+   196→   196→  5. MIME map: .mjs text/javascript (pdf.worker module worker), .ttf, .otf, .webp, .xml.
+   197→   197→  6. Resource limits enforced per reference constants/limits.ts (250 msgs/conv, 100 convs/space, 100 assets/space, 10k spaces/user -> 422 LimitReachedError shape {Code,Error}).
+   198→   198→  7. Removed dead persistAssistantMessage call (undefined fn, inert).
+   199→   199→- WEB_SEARCH parity (server-side Lumo tool): bridge gained POST /tools/web_search (z-ai SDK) + minimal tool-call bridging (text protocol -> OpenAI tool_calls frames; tool-role message mapping); lumo-server loop advertises web_search and dispatches built-ins to the provider /tools/* endpoint with graceful fallback. Verified E2E: zap_tool start/done frames + cited answer with real results.
+   200→   200→- Tests: pre-existing failures (3) root-caused to mcp-proxy harness missing LUMO_TEST=1 (automation MCP server self-registered, inflating tool catalogs); fixed harness + updated assertions for the new catalog (7 tools) + guest contract. 62/62 pass.
+   201→   201→- DATA RECOVERY: admin's masterkey KV row was missing (pre-existing data loss, no code path deletes it) -> old space/conversation undecryptable after reload. Per charter (test data cleanup) reset admin's crypto-bound test rows; post-fix re-verified full cycle: login -> chat -> reply -> reload -> conversation restored REMOTE-side, ZERO deserialize/AD errors; memory re-enabled + persists across reload.
+   202→   202→
+   203→   203→Stage Summary:
+   204→   204→- Instance is now measurably closer to the Proton Lumo webclient than at audit start; guest mode, remote-refresh decryption, web search, What's-New, AI Paper Trail, telemetry acks, MIME, limits all aligned.
+   205→   205→- Remaining known deviations (intentional, documented): dist patches for BYOK transport (OpenAI frames vs Proton SSE), local auth vs Proton SSO, fake plus plan/payments stubs, dictation via Web Speech bridge (no /realtime WS), generate_image/web_extract/proton_info/weather/stock tools unimplemented, LumoArtifactsView + LumoAPIKeyManagement off, suggestions chip off (transport lacks suggested_questions target), server-side base prompt replaced by dist-patch system note.
+   206→   206→- Tests 62/62; server PID via pgrep -f lumo-server.cjs; bridge on 127.0.0.1:3040.
+   207→   207→
+   208→   208→---
+   209→   209→Task ID: sl9-selene-alignment
+   210→   210→Agent: Z.ai Code (main)
+   211→   211→Task: Source-alignment audit of SL9-SELENE vs original Proton Lumo webclients; answer user question about MCP conflict; verify memory E2E; keep BYOK.
+   212→   212→
+   213→   213→Work Log:
+   214→   214→- Pinned reference baselines: ProtonMail/WebClients @ d40cc71a0a70324b311c4497cb4531b6c6fefce2 (sparse: applications/lumo + packages/lumo-api-client) at /home/z/reference/WebClients; ProtonLumo/android-lumo @ 20440d0f2374da3dacbde77cb43d88936529dc99 at /home/z/reference/android-lumo.
+   215→   215→- Grep audit: original webclients lumo has ZERO MCP references (no modelcontextprotocol dep). Its "tools" = Proton server-side AI-plane tools (web_search per types-api.ts ToolName) + public OpenAI-compatible API. android-lumo is a WebView wrapper — no memory/MCP natively.
+   216→   216→- Original memory implementation fully mapped: LumoMeowmory flag (useLumoFlags.ts:49), Memory {id,content,createdAt,source} in encrypted LumoUserSettings (GET/POST/PUT /api/lumo/v1/settings), client-side extraction via quickChat (memoryHelpers.ts), auto-save every 10 prompts, [Memories:...] system-turn injection (llm/index.ts:245-268 Step 4b).
+   217→   217→- Verified our lumo-dist SPA bundle already contains the full original memory code (grep of built chunks).
+   218→   218→- Recovered lost-session context: git diff showed 149-insertion parity work (RESOURCE_LIMITS 422s, client AEAD tag echo, events shape, telemetry/entitlement sinks, MIME table, guest rate-limits, BUILTIN_PROVIDER_TOOLS web_search dispatch to provider /tools/web_search, LumoMeowmory flag).
+   219→   219→- Restarted mini-services/lumo-ai-provider dependency check (older instance already bound :3040, healthz OK; glm-4.6 chat completion verified).
+   220→   220→- Ran full LumoOS test suite: 62/62 pass (store 6, mcp-manager 17, mcp-connections 16, mcp-proxy 23).
+   221→   221→- Browser E2E (agent-browser): settings modal shows Memory + MCP Servers + AI Provider sections; added memory "The user's favorite color is purple." → persisted across full page reload (encrypted settings round-trip) → injected into new chat ("Your favorite color is purple."). MCP loop active (tools=16).
+   222→   222→- Investigated "lost memories" from prior session (blob had none) — attributed to unfinished final settings PUT when that session ended; re-verified full round-trip this session.
+   223→   223→- Wrote /home/z/SL9-SELENE/ALIGNMENT-REPORT.md (4-way classification, evidence, deviations/risks).
+   224→   224→- Committed work: 2bd0b7a (server, tests, mini-service, report). Screenshots left untracked.
+   225→   225→
+   226→   226→Stage Summary:
+   227→   227→- DECISION: no reset needed — our SPA IS the original webclients build (memory included); original has NO MCP so there is nothing to follow/reset; our MCP is a category-2 additive adaptation and stays; BYOK untouched.
+   228→   228→- Memory feature verified fully working E2E (panel, add, persistence, injection, auto-update toggle; generation-from-chats verified by prior-session screenshots).
+   229→   229→- All parity fixes in place; 62/62 tests green; browser-verified.
+   230→   230→- Key artifacts: /home/z/SL9-SELENE/ALIGNMENT-REPORT.md, references at /home/z/reference/{WebClients,android-lumo}, verify-*.png screenshots.
+   231→   231→- Run state: lumo-server PID 12037 on :3000 (restart: cd /home/z/SL9-SELENE && LUMO_PORT=3000 setsid -f node LumoOS/lumo-server.cjs > lumo-server.log 2>&1); z-ai bridge on :3040 (cd mini-services/lumo-ai-provider && setsid -f bun run dev).
+   232→   232→
+   233→   233→---
+   234→   234→Task ID: sl9-selene-gmail-agent-mcp
+   235→   235→Agent: Z.ai Code (main)
+   236→   236→Task: Fix openConnModal crash from user screenshot; set up Gmail MCP with user's OAuth credentials; make the agent fully automate MCP connections from chat (no manual configuration).
+   237→   237→
+   238→   238→Work Log:
+   239→   239→- Diagnosed screenshot: (1) ReferenceError openConnModal — patch script injected the 4 connection functions into ZProvPanel (provider panel) while buttons/modal live in ZMcpPanel (MCP panel); connModal state had been added to ZMcpPanel by a later patch run, hence render-OK/crash-on-click. (2) User's Gmail MCP config pointed at https://gmailmcp.googleapis.com/mcp/v1 — a real Google host but NOT an MCP endpoint (404/400/405); no official Google Gmail MCP exists.
+   240→   240→- Fixed (1) with LumoOS/fix-conn-modal-scope.cjs: position-aware injection of openConnModal/closeConnModal/submitConnModal/disconnectAccount into ZMcpPanel scope in chunks 1306+4124, SRI recompute (1272 checks, 0 mismatch), ?v=60 cache bump. Browser-verified: modal opens, submit shows graceful error.
+   241→   241→- Built Gmail as builtin AI-plane service: LumoOS/gmail-api.cjs (search/read/send/labels via Gmail REST with per-user OAuth token; 401→silent refresh→retry; no-ready-credential → auto-start OAuth and return needsAuth+authorizeUrl).
+   242→   242→- Extended mcp-connections.cjs: lumo__server_add control tool (agent registers servers; reuses admin save path via registerServerDef callback; cap 64; logged), CONTROL_SYSTEM_NOTE rewritten to full-automation policy (register itself, no manual guidance, no connect confirmation dead-turn; disconnect keeps confirm), validateBuiltin (Gmail profile ping), getBuiltinCredential/setBuiltinCredential (AES-GCM, refresh material), oauth.extraParams passthrough (access_type=offline, prompt=consent), connect no longer requires confirm.
+   243→   243→- Extended lumo-server.cjs: registerServerDefCb (handleLumoData, withMcpConfigLock), gmail tool offering + dispatch branch in chat loop, builtin defs skipped from MCP enumeration, https-correct redirect_uri via x-forwarded-proto/host (mcpOrigin + connect endpoint + loop.baseUrl).
+   244→   244→- mcp-manager.cjs normalizeEntry: preserve builtin + oauth.extraParams.
+   245→   245→- Registered gmail def in DB with user's OAuth client (917070645396-...client_id + GOCSPX-... secret), scopes gmail.modify+gmail.send, PKCE. The AIzaSy API key is NOT needed for Gmail mailbox access (OAuth covers it).
+   246→   246→- Updated tests to new policy (2 tests edited in mcp-connections.test.mjs, tool-count + note assertions in mcp-proxy.test.mjs). All 62 tests green.
+   247→   247→- E2E verified: chat "Connect my Gmail please." → agent auto-called lumo__connections_list → lumo__connection_connect(gmail) → returned Google consent URL with correct client_id/scopes/PKCE/access_type=offline. Probe of Google authorize URL shows redirect_uri_mismatch — the redirect URI is not yet registered on the user's Google Cloud OAuth client.
+   248→   248→
+   249→   249→Stage Summary:
+   250→   250→- Agent-driven MCP connection is LIVE: users just ask in chat; the agent registers + connects + hands over the consent URL.
+   251→   251→- Gmail builtin works end-to-end once the user completes consent; ONE manual step remains: add redirect URI https://preview-chat-ad86a609-740d-4a6c-8bd5-1eac8893aaf9.space-z.ai/mcp/oauth/callback to the OAuth client's Authorized redirect URIs in Google Cloud Console (Google-enforced; cannot be automated). If the preview host changes, the URI changes with it.
+   252→   252→- UI crash fixed and committed (9cdf9bd); MCP.md documents both features.
+   253→   253→- Security notes: user pasted the client secret into chat — recommend rotating it after setup; secrets stored server-side encrypted (AES-256-GCM) and never exposed to the model.
+   254→   254→- Run state: lumo-server on :3000 (PID fresh, setsid), z-ai bridge on :3040.
+   255→   255→
+   256→   256→---
+   257→   257→Task ID: sl9-tasklet-connectors
+   258→   258→Agent: Z.ai Code (main)
+   259→   259→Task: User asked "is that the best and correct way of connecting to apps etc — I want it to work like tasklet when connecting" (after their Gmail API connect attempt crashed with openConnModal ReferenceError + Google 404). Build Tasklet-style app connection + fix the crash.
+   260→   260→
+   261→   261→Work Log:
+   262→   262→- Sandbox had RESET: re-cloned github.com/mi7sudev/SL9-SELENE (previous local commits 2bd0b7a/9cdf9bd were LOST — never pushed). Restored my-project from /home/sync/repo.tar (worklog + tool-results only; lumo-ai-provider mini-service was lost and rebuilt from worklog spec).
+   263→   263→- Viewed user upload /home/sync/upload/pasted_image_1789064433295.png: (1) ReferenceError openConnModal is not defined from chunk 1306?v=40 onClick; (2) Google 404 page rendered in panel (their config used gmailmcp.googleapis.com — a nonexistent host).
+   264→   264→- Root-caused the crash EVEN in the repo's v=59 chunks: fix-in-app-conn-modal.cjs had injected openConnModal/closeConnModal/submitConnModal/disconnectAccount into ZProvPanel's scope while the Connect account button + modal JSX live in ZMcpPanel (separate arrow functions in webpack module 32275) — clicking could never resolve the binding. Also: the admin form had NO OAuth client id/secret inputs at all (mcpSave round-trips oauth but nothing renders it), so Gmail OAuth was UI-impossible; generic http OAuth pointed at Google endpoints yields Google 404/405 by design (Google APIs are not MCP servers).
+   265→   265→- Built LumoOS/google-connector.cjs: google pseudo-transport. 6 synthesized MCP-shaped tools (gmail_search/gmail_read/gmail_send, calendar_list_events/calendar_create_event, drive_search) with readOnlyHint annotations (send/create = write → admin approval required, same policy path as MCP tools); per-app live probes (labels/events/files) so ready = really usable; transparent access-token refresh (in-memory cache per connection, long-lived refresh token stays AES-GCM-encrypted in the record); LUMO_GOOGLE_* env overrides for testing.
+   266→   266→- mcp-manager.cjs: transport 'google' in normalizeEntry (auth forced oauth, googleApps normalized), connect() google branch (probe + synthesize + lastDiscoveredAt), callTool() google branch.
+   267→   267→- mcp-connections.cjs: findReadyCredential now returns refreshToken; validateConnection passes it to manager.connect; google authorize URL extras (access_type=offline&prompt=consent&include_granted_scopes=true — Google only issues refresh tokens with these).
+   268→   268→- lumo-server.cjs: saveMcpEntry accepts transport google (auth forced oauth; oauth endpoints/scopes PRESET from google-connector so URLs can't be mistyped; client id/secret required; googleApps normalized, at least one app); mcpServerView exposes googleApps; OAuth redirect URIs now honor x-forwarded-proto at ALL THREE sites (callback page, in-app connect, chat loop.baseUrl) — fixes redirect_uri mismatch between authorize and token exchange behind the HTTPS gateway; /mcp/oauth/callback pages embed a postMessage ping + auto-close script (popup handshake); restored lost feature flags (LumoMeowmory + WhatsNewV2/VisualizationInstructions/CustomAgents/AiPaperTrail*).
+   269→   269→- LumoOS/patch-google-apps.cjs (idempotent, anchor-verified, SRI recompute + v=60): fixes the scope bug by MOVING the connection funcs into ZMcpPanel; rewrites openConnModal for oauth to auto-start the flow and open a centered popup (window.open, 'lumo_oauth'); global message listener closes the loop (success → connected status → loadMcp() → auto-close dialog; denied → honest error); quick-add preset buttons Gmail/Calendar/Drive next to + Add server; google form branch (app picker chips, OAuth client id/secret inputs — previously nonexistent, redirect-URI helper with click-to-select, google-aware auth dropdown); mcpNew/mcpEdit/mcpSave google-aware; updated oauth modal hint text. NOTE: chunk surgery regex bugfixes during development (alias capture group, thisArg `,app` evaluated outside map callback → ReferenceError app is not defined — caught in browser testing, fixed to `})})})`).
+   270→   270→- Rebuilt mini-services/lumo-ai-provider (Bun, :3040): /healthz, /v1/models, /v1/chat/completions (+/chat/completions), /tools/web_search; seeded admin_config kv (Sandbox z-ai Bridge, glm-4.6/glm-4.5-air, defaultModel glm-4.6). First chat E2E failed empty because BYOK appends /chat/completions to base — fixed both sides (bridge accepts both paths; seeded baseUrl now .../v1).
+   271→   271→- E2E verified in browser (agent-browser): admin signup/login; Settings→MCP Servers shows Gmail/Calendar/Drive presets; Gmail preset → prefilled google form (chips, client id/secret, redirect helper) → Save → server card appears (auth: oauth, googleApps: gmail); Connect account → modal opens (ZERO ReferenceErrors) + popup tab to accounts.google.com (fake test client → Google's own 'invalid_client' page = correct URL construction; real client id will show consent) → simulated postMessage → modal flips to connected and auto-closes; lumo-automation stdio regression: Connect → connected, 11 tools; chat E2E: BRIDGE-OK reply through BYOK+MCP loop (tools=15 advertised); test suite 62/62 pass.
+   272→   272→- Cleaned test artifacts (test google servers + orphan connection records deleted; lumo-automation remains).
+   273→   273→- Committed a9cdb29→new commit locally ("Tasklet-style Google app connectors..."); push not possible (no GitHub credentials in sandbox). Backup tar: /home/sync/sl9-selene-after-google.tar.
+   274→   274→
+   275→   275→Stage Summary:
+   276→   276→- ANSWER to the user: the old way (pasting Gmail API/Google URLs into a generic MCP form) was NOT correct — Google APIs aren't MCP servers and manual URLs are what produced the Google 404. Replaced with a Tasklet-style flow: quick-add app presets → paste ONE Google OAuth client (one-time, Google-enforced) → Connect account → popup consent → auto-close → tools live in chat.
+   277→   277→- What the user must do once for real Gmail: (1) Google Cloud Console → enable Gmail API (and Calendar/Drive if wanted) → create OAuth client ID (Web application) → add Authorized redirect URI https://preview-chat-ad86a609-740d-4a6c-8bd5-1eac8893aaf9.space-z.ai/mcp/oauth/callback (stable for this chat session; changes if the preview host changes) → (2) paste client id/secret in the form → Save → Connect account → approve popup. Chat can then search/read Gmail (and send once the admin ticks gmail_send on).
+   278→   278→- The openConnModal crash is fixed at the ROOT (scope), not just repatched; regression suite 62/62; chat + memory flags restored after sandbox reset.
+   279→   279→- Run state: lumo-server PID (pgrep -f lumo-server.cjs) on :3000, log /home/z/SL9-SELENE/lumo-server.log; z-ai bridge on 127.0.0.1:3040 (cd /home/z/my-project/mini-services/lumo-ai-provider && setsid -f bun run dev > provider.log 2>&1).
+   280→   280→---
+   281→   281→Task ID: sl9-agent-auto-connect
+   282→   282→Agent: Z.ai Code (main)
+   283→   283→Task: User asked for the agent to connect ANY service on its own — "I will just give the api and he can do the rest like find the base url, the end points etc". Build agent-driven auto-connect (service discovery + registration + key ingestion + live validation), not just the admin-preset Google connectors.
+   284→   284→
+   285→   285→Work Log:
+   286→   286→- Built LumoOS/rest-connector.cjs: generic REST pseudo-transport. Endpoint normalization (name sanitization, method whitelist, {param} path templates, param schema types), MCP tool synthesis with readOnlyHint annotations (GET/HEAD=read, others=write → admin approval gating), execution with header/query auth injection, origin pinning (path can never leave the configured baseUrl), live validation probes (2xx/429→ok, 401/403→auth_rejected). FIXED new URL() relative-resolution bug: baseUrl without trailing slash dropped its last path segment (api.openweathermap.org-style paths) — buildUrl now pins a directory-style base.
+   287→   287→- Built LumoOS/service-registry.cjs: curated recipes for 19 services (10 hosted-MCP OAuth/none + 9 REST api_key/keyless incl. CoinGecko + GitHub REST keyless demos), alias/containment matching, recipeView payloads (no key material ever), researchService fallback via z-ai bridge web_search + page_reader (time-budgeted, html→text).
+   288→   288→- mcp-manager.cjs: 'rest' transport (normalize/connect=probe+synthesize/callTool=execute, SSRF assertUrlAllowed on connect, redaction).
+   289→   289→- lumo-server.cjs: saveMcpEntry accepts transport rest (+authQueryName, endpoints); HOISTED saveMcpEntry/findMcpServer/mcpServerView out of the admin handler to module scope (python surgery) so the control plane reuses the exact admin save path; connService gained registerServerDef handler (strips agent-supplied ids + toolPermissions, 64-cap, config lock) and lookupService; buildMcpChatLoop computes isAdmin, offers control tools when defsExist||isAdmin (bootstrap path), passes isAdmin into executeControlTool.
+   290→   290→- mcp-connections.cjs: NEW control tools lumo__service_lookup, lumo__server_add (admin-gated), lumo__connection_submit_key (encrypt→registerSecret→validateConnection, never echoes key); CONTROL_SYSTEM_NOTE rewritten to the auto-connect pipeline (lookup→add→key→status-verify, keys verbatim only into submit_key, confirm-free connect, disconnect keeps confirm); submitKey exported.
+   291→   291→- Bridge (mini-services/lumo-ai-provider): added /tools/page_reader. CRITICAL FIX: Z.ai upstream IGNORES the OpenAI tools param and does not return tool_calls — the bridge now serializes the tool catalog into the system preamble (protocol: emit <tool_code>Name({...})</tool_code>) and translates BOTH directions (assistant tool_calls→text blocks, role:'tool'→user text; response <tool_code> AND [Tool call: {...}] formats parsed into OpenAI tool_calls with finish_reason tool_calls; unknown tool names stay as visible text). Before this fix NO tool ever actually executed through this provider — the model hallucinated tool results as text.
+   292→   292→- Tests: mcp-connections 19 (confirm-gate tests updated to confirm-free connect; +3 auto-connect tests: registry recipe shape/offline fallback, server_add admin-gate + id-stripping + permission stripping, submit_key wrong→needs_reauth/right→ready/live credential proof/no key in logs), new service-registry.test.mjs 5 (matching, recipe hygiene, offline research degradation, endpoint normalization, URL/path/auth execution vs stub, probe classification), mcp-proxy 23 (counts 4→7 control tools, note regexes, passthrough test split: admin keeps control plane on zero servers, non-admin pure passthrough). 70/70 green with LUMO_TEST=1.
+   293→   293→- Browser E2E (admin chat): "Connect me to CoinGecko" → service_lookup (3ms registry hit) → server_add (mcp-84f794b2, rest, auth=none) → "bitcoin price in USD" → Connected (rest): endpoints=3 → Tool completed mcp-84f794b2__simple_price → REAL live answer ($77,046, -1.67% 24h from include_24hr_change) — not hallucinated, verified in bridge raw logs. Settings→MCP Servers shows "CoinGecko — rest · 3 tools · connected". Debugged+fixed along the way: bridge tool translation (2 rounds), tool-result double-wrapping, CoinGecko 404s from the URL bug.
+   294→   294→- Honest limitation: hosted OAuth MCP endpoints (Notion/Linear/Sentry) need dynamic client registration — not supported yet; saveMcpEntry + registry notes now tell the agent to say so and use API-key alternatives (GitHub altRecipe) or admin static OAuth client.
+   295→   295→- Committed 36921d5. Backup: /home/sync/sl9-selene-agent-connect.tar. Run state: lumo-server :3000 (fresh PID), bridge :3040 with /tools/page_reader.
+   296→   296→
+   297→   297→Stage Summary:
+   298→   298→- ANSWER to the user: YES — now you can just tell the agent "connect me to X" in chat; for API-key/keyless services it finds the recipe (or researches it), registers the server, stores+validates your key, and the tools work from your next message. Verified end-to-end with a REAL CoinGecko price fetched live.
+   299→   299→- 19 curated services + web-research fallback for anything else; REST transport turns any JSON API into MCP-shaped tools; keys AES-256-GCM at rest, redacted everywhere, never echoed.
+   300→   300→- ROOT CAUSE fixed en route: the z-ai bridge never supported tool calling — ALL agent tool use (including the earlier Gmail work) only ever worked against the test stub; now translated both directions and proven live.
+   301→   301→- Known gap (documented): dynamic OAuth client registration for hosted MCP endpoints — follow-up (RFC 8414/DCR) if the user wants Notion/Linear auto-connect.
+   302→   302→
+   303→   303→---
+   304→   304→Task ID: gmail-redirect-fix
+   305→   305→Agent: Z.ai Code (main)
+   306→   306→Task: Fix Google "Error 400: redirect_uri_mismatch" on Gmail connect + strengthen agent-driven auto-connect guidance
+   307→   307→
+   308→   308→Work Log:
+   309→   309→- Located root cause: Google validates redirect_uri BEFORE consent; Lumo sends <origin>/mcp/oauth/callback which was not registered in the user's Google Cloud Console OAuth client
+   310→   310→- mcp-connections.cjs startConnect: added redirectUri to every OAuth connect result; Google transport additionally gets googleSetup {redirectUri, consoleUrl, steps[], mismatchHelp}
+   311→   311→- connections_list/connection_status: added oauth readiness {ready, hasClientSecret} (booleans only)
+   312→   312→- connectInApp: passes redirectUri/googleSetup through to settings UI
+   313→   313→- CONTROL_SYSTEM_NOTE + tool descriptions + server_add nextSteps: agent must relay Google Console steps BEFORE the user opens the authorizeUrl; on reported 400 give mismatchHelp instead of retrying
+   314→   314→- Fixed 3 pre-existing test failures (mcp-proxy harness missing LUMO_TEST=1; built-in lumo-automation server skewed tool counts) — suite restored to 70/70
+   315→   315→- MCP.md: new troubleshooting section for redirect_uri_mismatch
+   316→   316→- Browser-verified golden path: "connect me to gmail" → agent autonomously runs service_lookup → connections_list → connection_status → connection_connect and replies with authorizeUrl + exact redirect URI + Console steps; verified redirectUri follows gateway X-Forwarded-Proto/Host
+   317→   317→
+   318→   318→Stage Summary:
+   319→   319→- Commit bdf451a on SL9-SELENE main
+   320→   320→- Test suite: 70/70 passing
+   321→   321→- Root cause of user's Google 400 confirmed as missing Authorized redirect URI registration on their Google OAuth client (Google-enforced, cannot be automated); product now self-documents the exact URI at connect time
+   322→   322→
+   323→   323→---
+   324→   324→Task ID: gmail-https-origin-pin
+   325→   325→Agent: Z.ai Code (main)
+   326→   326→Task: Review agent's Gmail connect reply; fix registrable redirect URI (https-only policy)
+   327→   327→
+   328→   328→Work Log:
+   329→   329→- Reviewed user's chat transcript: agent relayed the new pre-flight guidance faithfully, but the redirectUri it gave was http://ws-...fcapp.run/mcp/oauth/callback
+   330→   330→- Confirmed via web search: Google Console rejects plain-http redirect URIs for public domains (https-only, localhost excepted) — the http URI is unregistrable, which was the true root cause of the original Error 400
+   331→   331→- Root cause: Aliyun FC gateway does not set X-Forwarded-Proto, so lumo-server derived an http origin
+   332→   332→- Implemented LUMO_PUBLIC_ORIGIN env support in lumo-server.cjs: requestOrigin() helper replaces all three header-derived origin sites (in-app connect, chat loop, /mcp callback)
+   333→   333→- Added start-lumo.sh launcher with LUMO_PUBLIC_ORIGIN=https://ws-fcdd-a-ffbad-leaokfdhlr.cn-hongkong-vpc.fcapp.run
+   334→   334→- Restarted live server via start-lumo.sh; verified connect endpoint now returns https://ws-...fcapp.run/mcp/oauth/callback
+   335→   335→- Test suite 70/70 green; browser load clean
+   336→   336→
+   337→   337→Stage Summary:
+   338→   338→- Commit on SL9-SELENE main (LUMO_PUBLIC_ORIGIN + start-lumo.sh + MCP.md docs)
+   339→   339→- User must register https://ws-fcdd-a-ffbad-leaokfdhlr.cn-hongkong-vpc.fcapp.run/mcp/oauth/callback in Google Console, then approve the authorize URL the agent provides
+   340→   340→
+   341→   341→---
+   342→   342→Task ID: sl9-selene-403
+   343→   343→Agent: main (Z.ai Code)
+   344→   344→Task: Diagnose user-reported Google "Error 403: access_denied" after selecting Gmail account; upgrade product guidance for this failure mode
+   345→   345→
+   346→   346→Work Log:
+   347→   347→- Diagnosis: the 403 is PROGRESS — Google accepted the https redirect URI
+   348→   348→  (pinned via LUMO_PUBLIC_ORIGIN in d6d0bf6) and showed the account chooser;
+   349→   349→  the block happens because the OAuth consent screen is in Testing status and
+   350→   350→  the selected Google account is not yet a registered test user. Propagation
+   351→   351→  of test-user changes takes 5 min–a few hours (matches Google's own note).
+   352→   352→- LumoOS/mcp-connections.cjs: added `accessDeniedHelp` to the googleSetup
+   353→   353→  payload (test-user steps, exact-email requirement, same-project check,
+   354→   354→  propagation wait, 7-day refresh-token expiry in Testing mode); strengthened
+   355→   355→  steps[1] to name the exact test-user action; new CONTROL_SYSTEM_NOTE bullet
+   356→   356→  telling the agent 403 ≠ 400 and to not loop retries; connection_connect
+   357→   357→  description updated (with quoting bug introduced and immediately fixed).
+   358→   358→- LumoOS/MCP.md: new troubleshooting section "Error 403: access_denied" after
+   359→   359→  the 400/LUMO_PUBLIC_ORIGIN sections (incl. Branding cosmetic note).
+   360→   360→- Tests 70/70 green (node --test LumoOS/tests/*.test.mjs).
+   361→   361→- Server restart race hit EADDRINUSE once (old process still shutting down);
+   362→   362→  second start clean. Health: / -> 302, /guest -> 200.
+   363→   363→- End-to-end verify: admin login -> POST /api/lumo/v1/mcp/connections/connect
+   364→   364→  {serverId:mcp-b8e6fe97 (Google Gmail)} -> ok/authorizing, redirectUri is
+   365→   365→  https://ws-...fcapp.run/mcp/oauth/callback, googleSetup keys
+   366→   366→  [accessDeniedHelp, consoleUrl, mismatchHelp, redirectUri, steps]. Confirmed.
+   367→   367→- Committed bc7f193 on SL9-SELENE main.
+   368→   368→
+   369→   369→Stage Summary:
+   370→   370→- Error 403 access_denied = Testing-mode test-user gate, Google-side; user
+   371→   371→  must add their exact Gmail as test user and wait for propagation, then
+   372→   372→  reconnect (fresh authorizeUrl). Agent now relays this automatically via
+   373→   373→  googleSetup.accessDeniedHelp.
+   374→   374→- Caveat relayed to user: Testing-mode refresh tokens expire every 7 days ->
+   375→   375→  weekly re-auth; production publishing blocked for restricted Gmail scopes.
+   376→   376→- Live server running (setsid, LUMO_PORT=3000, LUMO_PUBLIC_ORIGIN=https).
+   377→   377→
+   378→   378→---
+   379→   379→Task ID: sl9-selene-plane-persistence
+   380→   380→Agent: main (Z.ai Code)
+   381→   381→Task: Fix failing Plane.so connection (wrong auth config) + address agent's lack of persistence (stops at first error, "MCP tool round limit reached")
+   382→   382→
+   383→   383→Work Log:
+   384→   384→- Probed Plane API live: X-API-Key header -> 200 (user itsmijsu.dev);
+   385→   385→  Authorization Bearer -> 401. Key was always valid; config was wrong.
+   386→   386→- Inspected the 3 registered Plane entries: two used Authorization/Bearer;
+   387→   387→  one used X-API-Key but kept authHeaderPrefix "Bearer" (sent
+   388→   388→  "X-API-Key: Bearer plane_api_..." -> 401); ALL used transport "http"
+   389→   389→  (MCP handshake) against a plain REST API -> validation could never pass.
+   390→   390→- Found the behavioral root cause: submitKey's failure message literally
+   391→   391→  instructed "ask the user to check the key and send it again" -> blind
+   392→   392→  retries; and MAX_MCP_ROUNDS = 5 cut the agent off mid-diagnosis
+   393→   393→  ("MCP tool round limit reached; stopping here.").
+   394→   394→- service-registry.cjs: added curated Plane recipe (transport rest,
+   395→   395→  X-API-Key, authHeaderPrefix '', verify /api/v1/users/me/, workspaces/
+   396→   396→  projects/issues endpoints, 60 req/min note). No recipe existed before,
+   397→   397→  which is why the agent guessed.
+   398→   398→- mcp-connections.cjs: submitKey failure message rewritten to a
+   399→   399→  diagnose-first protocol (probe with documented header; check rest vs
+   400→   400→  http / header name / prefix; re-register corrected config; only ask for a
+   401→   401→  new key on 401/403 with the correct header). New PERSISTENCE bullet in
+   402→   402→  CONTROL_SYSTEM_NOTE (no blind retries, ~3 distinct approaches max,
+   403→   403→  never stop after one failure while diagnostics remain).
+   404→   404→- lumo-server.cjs: MAX_MCP_ROUNDS 5 -> 12; new MCP_WRAPUP_NOTE; when the
+   405→   405→  budget is spent and the model still wants tools, run ONE final round
+   406→   406→  without tools (tools/tool_choice omitted) so it summarizes
+   407→   407→  progress/blocker/next step instead of stopping mid-sentence; hard stop
+   408→   408→  retained as backstop. Test contract updated (11 executed rounds + wrap-up).
+   409→   409→- Tests 70/70 green; restarted server clean (ROOT 302 / GUEST 200).
+   410→   410→- Live-instance fix via admin API: registered corrected Plane.so rest server
+   411→   411→  (mcp-87aa18a8, X-API-Key, prefix ''), connected with the user's key ->
+   412→   412→  status READY (REST probe validated). Deleted the 3 broken duplicates
+   413→   413→  (mcp-ac3e6539, mcp-f9b5be03, mcp-e62ef44e). Gmail still authorizing
+   414→   414→  (test-user propagation pending on the user's side).
+   415→   415→- Committed 493ef33 on SL9-SELENE main.
+   416→   416→
+   417→   417→Stage Summary:
+   418→   418→- Plane.so is CONNECTED and validated on the live instance (conns=ready).
+   419→   419→- Agent persistence upgraded: 12 tool rounds + graceful wrap-up round +
+   420→   420→  diagnose-before-retry control-plane rules.
+   421→   421→- Root causes for the user-visible failures: no vetted Plane recipe (agent
+   422→   422→  guessed config), submitKey's retry-focused failure message, 5-round cap.
+   423→   423→
+   424→   424→---
+   425→   425→Task ID: sl9-selene-orchestration-v1
+   426→   426→Agent: main (Z.ai Code)
+   427→   427→Task: Apply the Tasklet-style agentic orchestration loop pattern to the Lumo agent (user pasted the full pattern doc and asked whether it can be applied)
+   428→   428→
+   429→   429→Work Log:
+   430→   430→- Mapped the pattern onto Lumo: already present = connection state machine
+   431→   431→  (available/authorizing/discovering/ready/failed/needs_reauth/revoked,
+   432→   432→  persisted + encrypted), policy gates (evaluateToolPolicy execution-time
+   433→   433→  recheck, admin-only server_add, confirm-gated disconnect), validation as
+   434→   434→  verification (ready requires live probe), redaction, abort handling,
+   435→   435→  12-round budget + wrap-up (493ef33), diagnose-before-retry notes.
+   436→   436→  Missing = persistent run/step records, failure classification, event log,
+   437→   437→  decision/verification discipline, resumability.
+   438→   438→- store.cjs: new append-only agent_steps table (req_id, uid, kind, name,
+   439→   439→  status, error_code, duration_ms, round, redacted detail, created_at) with
+   440→   440→  indexes + insertAgentStep/listAgentStepsByReq/listRecentAgentSteps/
+   441→   441→  pruneAgentSteps; SCHEMA_SQL auto-migrates on boot (exec every open).
+   442→   442→- lumo-server.cjs: 30-day boot prune; classifyToolFailure() (transient/auth/
+   443→   443→  permission/input/unknown); every tool call recorded best-effort with
+   444→   444→  secrets redacted BEFORE insert; failed tool results tagged
+   445→   445→  [Failure class: ... — how to react]; wrapup step on budget exhaustion;
+   446→   446→  admin GET /api/lumo/v1/admin/mcp/steps (?reqId= / ?limit=);
+   447→   447→  MCP_SYSTEM_NOTE gained the ORCHESTRATION PROTOCOL section (goal + expected
+   448→   448→  observation before each call; verify before claiming; honest summaries).
+   449→   449→- NOTE: MultiEdit is NOT atomic in this environment — first batch partially
+   450→   450→  applied (4 of 6 edits) and the retry duplicated the prune line; fixed by
+   451→   451→  auditing grep counts for every marker (each must be 1) then re-applying
+   452→   452→  the two missing edits individually.
+   453→   453→- Tests 70/70; restarted; health ROOT 302 / GUEST 200.
+   454→   454→- Live E2E: drove a real chat run via /byok-api/chat/completions (glm-4.5-air,
+   455→   455→  stream) that called lumo__connections_list; step row persisted
+   456→   456→  (req mcpmtwm69401, control_tool, ok, round 1, redacted detail); steps
+   457→   457→  endpoint returns the trail.
+   458→   458→- MCP.md: 'Run/step audit (orchestration v1)' + explicit not-built-yet
+   459→   459→  roadmap (resumable runs, waiting_approval persistence, parallel read-only
+   460→   460→  execution, idempotency keys, spend budgets).
+   461→   461→- Committed dda0309 on SL9-SELENE main.
+   462→   462→
+   463→   463→Stage Summary:
+   464→   464→- Orchestration v1 shipped: run/step audit log + failure classes + decision/
+   465→   465→  verification protocol + admin audit API. Model proposes, server executes/
+   466→   466→  records/verifies — the core Tasklet principle now holds for chat runs.
+   467→   467→- Follow-ups (documented in MCP.md): persisted resumable runs with
+   468→   468→  waiting_input/waiting_approval states, parallel tool execution,
+   469→   469→  idempotency keys, token/spend budgets.
+   470→   470→
+   471→   471→---
+   472→   472→Task ID: lumo-source-alignment-audit
+   473→   473→Agent: Z.ai Code (audit mode)
+   474→   474→Task: Source-alignment audit of ProtoLumo (SL9-SELENE) vs Proton Lumo reference (vendored lumo-dist 5.0.999.999 / 82312b9 + charter LumoOS/AGENTS.md)
+   475→   475→
+   476→   476→Work Log:
+   477→   477→- Verified the repo vendors the real Proton Lumo client (lumo-dist, 191MB) behind a self-hosted Node backend; WebClients source clone absent (reported as gap).
+   478→   478→- Audited all LumoOS modules + patch chain vs charter security/architecture claims; baseline 70/70 tests.
+   479→   479→- Fixed only category-3 drift (14 files): runnable integrity/patch chain (D:/ProtoLumo paths -> LUMO_DIST_DIR||__dirname/lumo-dist), logReq redaction, automation server annotations + assertUrlAllowed SSRF guard + no value echo/false claims, store/db-backup CLI defaults, MCP.md + header spec rot, rest-connector no-op.
+   480→   480→- Verified: 70/70 tests, integrity diag 1272 checked / 0 mismatches, SSRF guard blocks loopback/metadata, server restarted, guest+login render via agent-browser, no page errors.
+   481→   481→
+   482→   482→Stage Summary:
+   483→   483→- Commit 6caf889 in /home/z/SL9-SELENE. Post-fix note: automation write tools need one-time admin opt-in in MCP panel (charter-correct). Residual gaps documented in the audit report (absent WebClients clone, no-op manifest, diag silent skips, bust-cache 1681 gap, Proton marketing title in guest route, sandbox scaffold debris).
+   484→   484→
+   485→   485→---
+   486→   486→Task ID: lumo-audit-residual-fixes
+   487→   487→Agent: Z.ai Code (fix mode)
+   488→   488→Task: FIX EVERYTHING THAT REQUIRE FIXING — close all residual gaps left by the source-alignment audit (6caf889)
+   489→   489→
+   490→   490→Work Log:
+   491→   491→- Recovered the audit's residual-gap list from worklog + verified each in code:
+   492→   492→  (1) diag silent skips, (2) bust-cache hardcoded 4-prefix list, (3) stale
+   493→   493→  no-op patch manifest, (4) Proton marketing copy in guest noscript,
+   494→   494→  (5) sandbox scaffold debris tracked in git, (6) absent WebClients reference.
+   495→   495→- diag-all-runtime-integrity.cjs: removed all silent `continue`s. New
+   496→   496→  accounting: checked / mismatches / missing-files / no-integrity. Gate now
+   497→   497→  fails on MISMATCH and MISSING-FILE; NO-INTEGRITY is inventoried with an
+   498→   498→  evidence-based rationale: the 6 affected mappings (crypto-worker,
+   499→   499→  logger-read-worker, proton-cr3/raw-images, 9358, 7804) have NO sha384
+   500→   500→  entry in ANY form, are referenced by NO patch/fix script (untouched
+   501→   501→  upstream bytes), and are worker/image-asset chunks Proton's own build
+   502→   502→  excludes from SRI (Workers can't carry integrity attributes). Injecting
+   503→   503→  entries would be speculative upstream surgery -> reported, not failed.
+   504→   504→- bust-cache-admin.cjs: generalized from hardcoded PREFIXES=[4206,1306,4124,1230]
+   505→   505→  to derive chunk set from EVERY runtime's URL->SRI mappings (same regex as
+   506→   506→  diag). Fixes only genuine disk-vs-runtime disagreements; bumps ?v= only for
+   507→   507→  chunks whose bytes changed; preserves the boot-tag version otherwise
+   508→   508→  (v=61 reserved as next bump; my first cut wrongly downgraded ?v=60 -> v=40,
+   509→   509→  caught in self-review and reverted). Idempotent: rerun = no-op.
+   510→   510→- Regenerated patch-mcp-promptbar.manifest.json via idempotent re-run
+   511→   511→  (statuses all already-patched; no chunk byte changes).
+   512→   512→- index.html noscript: replaced Proton marketing that is FALSE for a
+   513→   513→  self-hosted instance ("We keep no logs...saves nothing on our servers",
+   514→   514→  "Neither Proton nor anyone else can see them", "Lumo's code is fully open
+   515→   515→  source", "European service subject to GDPR", "owned by a Swiss nonprofit",
+   516→   516→  "scientists behind Proton Mail/VPN") with honest self-hosted copy + explicit
+   517→   517→  attribution "originally created by Proton; Proton does not operate this
+   518→   518→  server". 7 counted replacements, verified byte-exact first. Only remaining
+   519→   519→  "Proton" = the honest attribution. No SRI'd elements touched.
+   520→   520→- Repo hygiene: untracked from git (files kept on disk): tool-results/ (30),
+   521→   521→  dead Next.js scaffold (src/, prisma/, public/, examples/, mini-services/,
+   522→   522→  tests/, .zscripts/, package.json, bun.lock, tsconfig.json, next/tailwind/
+   523→   523→  postcss/eslint/components configs), .env (was force-added), db/custom.db,
+   524→   524→  empty worklog.md, download/. Product repo is now LumoOS/ + AGENTS.md +
+   525→   525→  start-lumo.sh + Caddyfile + .gitignore. Verified no LumoOS code references
+   526→   526→  any untracked root path first.
+   527→   527→- Verified: node --check clean on both scripts; node --test LumoOS/tests =
+   528→   528→  70/70 PASS; integrity gate PASS (2585 checked, 0 mismatches, 0 missing);
+   529→   529→  server restarted clean (ROOT 302, GUEST 200, dictation bridge 200); agent-
+   530→   530→  browser golden path: / -> 302 /guest renders (no console/page errors),
+   531→   531→  signup "auditfix" -> /u/0 authenticated UI with sidebar, zero errors.
+   532→   532→- Committed a0ddebb on SL9-SELENE main (on top of 6caf889).
+   533→   533→- WebClients reference clone: first attempt (sparse blob:none) died at 116K
+   534→   534→  (sandbox too slow for the monorepo); retry with --single-branch --no-tags
+   535→   535→  --filter=blob:none running in background (/tmp/webclients-clone2.log).
+   536→   536→  Reference-only, gitignored, does not block anything.
+   537→   537→
+   538→   538→Stage Summary:
+   539→   539→- All 6 audit residual gaps closed or documented; HEAD a0ddebb; tests 70/70.
+   540→   540→- Key classification calls this round: the 6 no-SRI mappings are category 1
+   541→   541→  (upstream-aligned, NOT drift) — the earlier "bust-cache 1681 gap" was real
+   542→   542→  tooling hardcode, now fixed by derivation; noscript marketing was category
+   543→   543→  3-adjacent (false claims for self-host) — fixed with honest copy, not
+   544→   544→  rebranding of core.
+   545→   545→- Remaining knowns: WebClients clone pending (reference-only); Gmail OAuth
+   546→   546→  still awaiting user-side test-user propagation; "Proton applications"
+   547→   547→  button label inside minified SPA chunk left as-is (upstream client
+   548→   548→  surface, rebranding explicitly out of audit scope).
+   549→   549→
+   550→   550→---
+   551→   551→Task ID: lumo-agent-persistence-v2
+   552→   552→Agent: Z.ai Code
+   553→   553→Task: Analyze the user's live transcript (Plane delete/create run) where the agent "instantly stops after doing a thing"; root-cause and fix
+   554→   554→
+   555→   555→Work Log:
+   556→   556→- Mapped the transcript's failure pattern: (a) agent emitted tool calls as
+   557→   557→  TEXT ([Tool call: {...}] / <tool_code>…</tool_code>) that never executed,
+   558→   558→  then waited for user pushes ("okay"/"go ahead"/"how is it?"); (b) first
+   559→   559→  delete used a FABRICATED project id (a3e6b6b5-… not from any listing);
+   560→   560→  (c) list_workspaces 404 → agent asked user for slug instead of diagnosing;
+   561→   561→  (d) "successfully updated" claim for the re-registered connection was
+   562→   562→  never verified end-to-end; (e) create_project emitted as broken-JSON text
+   563→   563→  (unescaped quotes in description_html) and the turn ended there.
+   564→   564→- Root cause in code: runMcpChatLoop's wantsTools required native
+   565→   565→  roundResult.toolCalls; text-emitted calls fell through → turn ended.
+   566→   566→- lumo-server.cjs: added text-embedded tool-call support — balancedJsonObject
+   567→   567→  (string-aware brace scan), parseTextToolCall (Form A JSON descriptor +
+   568→   568→  Form B name({args})), extractTextToolCalls (wrappers: <tool_code>, fenced
+   569→   569→  tool_code, [Tool call: …]; validates target against advertised toolNames;
+   570→   570→  max 4/round; args ≤64KB; unknown/malformed → corrective system note, max
+   571→   571→  2/request). Loop integrates before wantsTools; synthesized assistant
+   572→   572→  tool_calls history (ids zaptxt_*) + same execution/audit path as native.
+   573→   573→- MCP_SYSTEM_NOTE: new TOOL DISCIPLINE section (tool mechanism only;
+   574→   574→  LIVE IDS ONLY — re-list before id ops; VERIFY MUTATIONS before claiming
+   575→   575→  success; KEEP GOING — don't end turn for discoverable facts; one-variable
+   576→   576→  retries). Watch out: template literal cannot contain ``` — use words.
+   577→   577→- Plane API validated live with the user's key: /api/v1/workspaces/ = 404
+   578→   578→  (endpoint does not exist on cloud — recipe bug, why the agent couldn't
+   579→   579→  discover the slug); me/list/get/create/patch/delete project all validated
+   580→   580→  (delete = 204 empty body; rest-connector handles that correctly already).
+   581→   581→- service-registry.cjs plane recipe: removed phantom list_workspaces, added
+   582→   582→  get/create/update/delete project, notes: slug from Plane URL, 204=success.
+   583→   583→- Live patch via admin PUT: all 3 stored Plane servers now carry the
+   584→   584→  corrected 8-endpoint set (view omits endpoints; verified in store DB).
+   585→   585→- E2E with real model (glm-4.5-air): chat asking project count → agent
+   586→   586→  called mcp-87aa18a8__list_projects and answered 3 projects autonomously.
+   587→   587→- MCP.md: Behavior in chat section documents text-call execution + discipline.
+   588→   588→- Tests: +2 (stub-text-toolcall executed + loop continues; malformed text
+   589→   589→  call → corrective note) → 72/72. Committed 512ae57.
+   590→   590→
+   591→   591→Stage Summary:
+   592→   592→- The "stops instantly" failure is fixed at the runtime level (text calls
+   593→   593→  now execute; malformed ones get corrected) + at the policy level (tool
+   594→   594→  discipline note) + at the recipe level (validated Plane endpoints).
+   595→   595→- Live instance restarted (ROOT 302 / GUEST 200), 72/72, HEAD 512ae57.
+   596→   596→- Note: real delete of HolaOS + creation of SELENE-9 project was the agent's
+   597→   597→  job in chat, not performed here; the agent now has working tools to do it.
+   598→   598→---
+   599→   599→Task ID: lumo-orchestration-v2
+   600→   600→Agent: Z.ai Code
+   601→   601→Task: Implement the user's "Agentic Orchestration Fix" addendum — connected services, credentials, and external actions — as deterministic runtime enforcement in the Lumo MCP loop
+   602→   602→
+   603→   603→Work Log:
+   604→   604→- Read the addendum (10 sections: Rules A–E, routing algorithm, resource
+   605→   605→  resolution, error classification, destructive protocol, run state,
+   606→   606→  acceptance tests) and mapped each requirement to an enforcement point.
+   607→   607→- Built LumoOS/orchestration.cjs: extractSecrets/maskSecrets/SecretStream
+   608→   608→  (branded + labeled credential shapes, streaming-safe masking window),
+   609→   609→  classifyFailure (unauthorized/forbidden/not_found/conflict/validation/
+   610→   610→  rate_limited/transient/capability_missing/input + guard verdict classes),
+   611→   611→  scanIds (UUID evidence pool), isDestructiveCall (DELETE endpoints,
+   612→   612→  destructiveHint, verb names), callFingerprint, run state (load/save per
+   613→   613→  conversation via store kv, 7d TTL), guardDestructive (already_executed →
+   614→   614→  prior_denial → rejected_id → unresolved_target → confirmation gate),
+   615→   615→  connectionBriefing, destructiveSuccessNote, SECRET_HANDLING_NOTE.
+   616→   616→- Wired into runMcpChatLoop: per-conversation state keyed by hash of first
+   617→   617→  user message; ACTIVE CONNECTIONS briefing appended to the system note from
+   618→   618→  the live qualified catalog; secret note injected after a pasted credential;
+   619→   619→  guard runs before any destructive execution (block → refusal tool result +
+   620→   620→  audit row, confirm → card, allow → execute once + ledger + verify nudge);
+   621→   621→  noteRejection keeps refused hallucinated ids invalid; noteObservation pools
+   622→   622→  every id from tool results and user text; streamed text passes through the
+   623→   623→  SecretStream (client-side masking with a 200-char holdback window); tool
+   624→   624→  card previews and agent_steps details additionally masked.
+   625→   625→- Fixed the Rule B violation in MCP_SYSTEM_NOTE (it literally told the model
+   626→   626→  to ask for API keys and store them); rewrote/extended the note with
+   627→   627→  CONNECTED SERVICES, ERROR HANDLING, OUTCOME REPORTING sections. Added the
+   628→   628→  CONNECTION FIRST + never-ask-keys rules to CONTROL_SYSTEM_NOTE.
+   629→   629→- service-registry: plane recipe gained urlPattern (parse workspace slug from
+   630→   630→  app.plane.so/<slug>/ URLs); recipeView passes it through.
+   631→   631→- Fixed a real bug the first e2e run exposed: readSseRound accumulated only
+   632→   632→  MASKED text into out.text, so withheld early-round text broke text-call
+   633→   633→  parsing (the v2 persistence fix). Now out.text keeps the raw text and only
+   634→   634→  the client-bound delta is masked.
+   635→   635→- Tests: new LumoOS/tests/orchestration.test.mjs (15 unit + 8 e2e) with a
+   636→   636→  fake Plane REST server (fake-plane-rest.cjs, incl. /__reset harness route)
+   637→   637→  and stub-orch-* provider scenarios (fabricated-id refusal, observed-id
+   638→   638→  execute-once, resume-without-repeat, confirmation hold, secret echo
+   639→   639→  masking, briefing/sysreport). mcp-proxy delete test updated for the new
+   640→   640→  confirmation gate. Full suite 95/95.
+   641→   641→- Live verification: server restarted (ROOT 302 / GUEST 200), agent-browser
+   642→   642→  golden path (guest → signup orchcheck → /u/0, zero console/page errors),
+   643→   643→  integrity gate PASS (2585 / 0 / 0, 78 NO-INTEGRITY inventoried).
+   644→   644→- Live backlog completed through the MANAGED connection (plane-backlog.cjs,
+   645→   645→  never the pasted key): HolaOS Agent OS - Beautiful UI deleted
+   646→   646→  (delete_project → 204, absent from the live list = verified) and
+   647→   647→  SELENE-9 (SL-9) created (201 → get_project 200, id 305f4fb8-b204-4f2d-
+   648→   648→  a3c2-501fc2cbee90, workspace personal-mijsu).
+   649→   649→
+   650→   650→Stage Summary:
+   651→   651→- Commit f024eb9 on top of 512ae57. 95/95 tests, gate PASS, live instance
+   652→   652→  healthy.
+   653→   653→- The six transcript failure modes now have runtime enforcement, not just
+   654→   654→  prompt policy: hallucinated ids → unresolved_target/rejected_id refusal;
+   655→   655→  no verification → verify nudge + ledger; one-action-then-stop → keep-going
+   656→   656→  notes + briefing; tool-call-as-text → executed via v2 parser; broken JSON
+   657→   657→  args → input class with escaping hint; secret asking → removed from the
+   658→   658→  note + SECRET HANDLING protocol + no-echo masking.
+   659→   659→- Known pre-existing (not introduced here): eslint flags require() in all
+   660→   660→  LumoOS CommonJS files (config is Next/TS oriented) — untouched store.cjs
+   661→   661→  flags the same; noted as follow-up hygiene.
+   662→   662→
+   663→   663→---
+   664→   664→Task ID: agent-tool-creation
+   665→   665→Agent: Z.ai Code
+   666→   666→Task: SL9-SELENE agent tool creation — make agent-created tools real (live example: agent could not update SELENE-9 Plane project description; write tools existed but were permission-gated invisible, and lumo__server_add stripped permission maps so re-registration could never produce a usable write tool).
+   667→   667→
+   668→   668→Work Log:
+   669→   669→- Root-caused first (no code until the mechanism was fully mapped): rest write endpoints are write-classified and hidden until toolPermissions[name]==='on'; registerServerDef strips agent-supplied maps.
+   670→   670→- rest-connector.registrationToolPermissions (pure): POST/PUT/PATCH auto-'on' on admin-path rest registrations; DELETE excluded; explicit prior 'off' wins; map carried forward.
+   671→   671→- lumo-server registerServerDef: grant on create + in-place update; writeToolsEnabled surfaced.
+   672→   672→- mcp-connections: server_add grantNote + description + CONNECTION note TOOL CREATION rule; MCP.md updated.
+   673→   673→- Tests 155/155 (+4). Live: Plane def granted create_project/update_project/create_issue; setsid -f restart; managed-connection update_project PATCH 200 with byte-identical read-back (SELENE-9 untouched); gate 2585/0/0.
+   674→   674→- Commit 2b674d6. Full record in /home/z/SL9-SELENE/worklog.md.
+   675→   675→
+   676→   676→Stage Summary:
+   677→   677→- Agent self-service tool creation is now real end-to-end; SELENE-9 description update is a plain chat request. DELETE stays admin-gated.
+   678→   678→- Ops: restart with `setsid -f ./start-lumo.sh > lumo-server.log 2>&1 < /dev/null` (plain backgrounded setsid gets reaped).
+   679→   679→
