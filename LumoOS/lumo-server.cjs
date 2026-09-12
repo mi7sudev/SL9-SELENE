@@ -130,7 +130,7 @@ function saveAdminConfig(cfg) {
 // every signed-in user's chats can use the enabled tools. Env secrets live
 // here and inside mcp-manager.cjs only — API responses expose `envKeys`,
 // never values. See MCP.md.
-const MAX_MCP_ROUNDS = 5;           // tool-call rounds per chat request
+const MAX_MCP_ROUNDS = 8;           // tool-call rounds per chat request
 const MAX_MCP_TOOLS = 128;          // tool definitions advertised to the model
 const MAX_MCP_SCHEMA_BYTES = 262144; // sum of tool input schemas
 
