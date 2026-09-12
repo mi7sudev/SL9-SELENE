@@ -106,3 +106,29 @@ Work Log:
 Stage Summary:
 - Lumo now classifies every failure, never treats 2xx as success, works the recovery ladder (search -> repair -> alternate -> compose -> factory), can create dry-run-tested run-scoped REST tools, quarantines defective ones, gates writes behind chat confirmation, persists an immutable audit trail, and reports one of 6 honest outcome states. The runtime (not the model) owns credentials, hosts, methods, schemas, approvals, retries, budgets, quarantine, and expiry — generated tools are manifests (data), never code, so nothing the model produces can bypass governance.
 - Remaining (next phases): reusable-tool promotion w/ admin approval flow + versioned rollback UI, pause/resume state machine beyond the chat-native run_events rehydration, runs dashboard UI in the SPA, durable workers/schedules/webhooks (spec Phase 4), replay-from-recorded-results.
+
+---
+Task ID: lumo-dormant-write-tools
+Agent: Z.ai Code (main)
+Task: The agent listed Plane.so as connected (connections_list ok, status ready) but when asked "how many projects do we have in plane?" it emitted `<tool_code> mcp-97d6ea2b__project({"action":"list"}) </tool_code>` as literal TEXT instead of a real tool call. Diagnose and fix; keep the fix generic for ANY MCP connection (per user requirement).
+
+Work Log:
+- Root-caused from lumo-server.log + code: the failing request's catalog was tools=31 = 11 (lumo-automation) + 3 (DeepWiki) + 3 (Plane read-only) + 14 (control plane). Plane declares 28 tools write-capable (readOnlyHint:false annotations), and evaluateToolPolicy (lumo-server.cjs) silently WITHHELS write-classified tools from the model catalog unless entry.toolPermissions[name]==='on' — agent-side registration (lumo__server_add) strips toolPermissions, so nothing was ever 'on'. Meanwhile connections_list listed ALL tools with names+classifications, so the model synthesized the qualified name for a function it did NOT have and GLM fell back to pseudo-code text (<tool_code>). Dead end for the user.
+- Fix (generic dormant-write-tool lifecycle, no Plane-specific code):
+  - mcp-connections.cjs: new control tool lumo__tool_permission {serverId, tools[]|allowAllWrite, state} (admin-gated via setToolPermission callback); connectionStatusFor/connectionsListFor now flag every tool usable:true/false + dormantWriteTools count + an explicit note; CONTROL_SYSTEM_NOTE documents the lifecycle and forbids fabricating tool invocations as text/code.
+  - lumo-server.cjs: setToolPermissionCb (config lock + store.upsertMcpServer, validates names against the live tool list, honest skipped/verified reporting); extendLoopCatalog(loop) hot-ADDS freshly enabled tools to the RUNNING request's catalog (same advertisement rules) so the model can call them in the very next round of the same turn; resolveQualifiedLive(loop,qname) resolves qualified names live at execution (covers permission flips mid-request); approval_required refusals now append the exact remedy invocation; CONNECTION_CONTROL_TOOLS += tool_permission.
+  - MCP.md: documented the new tool + dormant semantics.
+- Test suite repairs (pre-existing breaks from the previous session's late uncommitted edits, found via diffing clean tree): mcp-proxy harness now spawns lumo-server with LUMO_TEST=1 (the auto-register of lumo-automation was leaking 11 extra tools into every test catalog: zero-servers saw 26 tools); round-limit test aligned to MAX_MCP_ROUNDS=10 (9 starts); control-plane counts 14 -> 15 with lumo__tool_permission in the sorted name list; new mcp-connections test 'tool_permission: admin gate, dormant usable flags, enable/disable round trip'.
+- Suite: 63/63 green (store 6, mcp-manager 17, mcp-connections 17, mcp-proxy 23).
+- Restarted lumo-server (kill old PID 11642; one EADDRINUSE retry — old process' graceful port release lagged; final PID 13705 on :8090 behind port-bridge :3000). Production process must NOT get LUMO_TEST (auto-registration stays on).
+- E2E via agent-browser (admin chat, real glm-4.6 through the :3040 bridge):
+  1. "how many projects do we have in plane?" -> native cards Ran connections_list -> Ran tool_permission -> Ran project; log: tool_permission ok (4ms), mcp-97d6ea2b__project ok (933ms); final answer lists the 3 REAL Plane projects (SELENE-9/SL-9, Homelab, DOST). No <tool_code> text anywhere.
+  2. Generality: DeepWiki (different connection) mcp-0324d029__ask_question -> ok (6.2s) with real content; a second call honestly reported the provider's "Repository not found" error (private repo) and offered next steps.
+  3. Follow-up requests now show tools=33 (persisted project permission permanently in the catalog) — next chats call Plane tools directly without re-enabling.
+  4. Mobile 390x844: no overflow, renders fine. Zero page console errors.
+- Committed 6230be5 locally (push needs user credentials). Screenshots: /home/z/SL9-SELENE/verify-plane-fixed.png, verify-mobile-chat.png.
+
+Stage Summary:
+- The agent can now use ANY MCP connection end-to-end from chat: register (lumo__server_add) -> credential (submit_key/connect) -> verify ready -> enable dormant write-classified tools (lumo__tool_permission, admin) -> call the tool (catalog hot-extends same-turn) -> real data answer, with honest classification-based governance preserved (dormant until opted in; refusal messages teach the model the remedy).
+- Root cause category to remember: any UI/control surface that shows the model tool NAMES that are not in its executable catalog invites fabricated text calls; visibility and callability must match (now enforced by usable flags + system note + remedy hints).
+- Also fixed: mcp-proxy test suite was silently broken by the previous session's LUMO_TEST guard (harness never set it) and the MAX_MCP_ROUNDS 5->10 bump (test still expected the 5-round contract); 63/63 now.

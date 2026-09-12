@@ -1,0 +1,732 @@
+     1→// mcp-connections.cjs — MCP connection lifecycle (the "control plane") for
+     2→// lumo-server.cjs.
+     3→//
+     4→// A connection is a user/tenant-scoped, credentialed binding to an
+     5→// admin-configured MCP server definition. This module owns:
+     6→//   - connection records in the SQLite store (store.cjs; credentials
+     7→//     AES-256-GCM encrypted inside the record)
+     8→//   - data/secret.key            (AES-256-GCM key, created on first use)
+     9→//   - the lifecycle state machine (authorizing → connected → ready |
+    10→//     failed | needs_reauth, plus revoked)
+    11→//   - one-time OAuth state flows (state + PKCE) and API-key setup flows
+    12→//   - the agent control-plane tools (lumo__*) and their system note
+    13→//
+    14→// Security invariants (see MCP.md):
+    15→//   - Credentials only ever live here, encrypted at rest; everything that
+    16→//     leaves this module is redacted status. Control-plane tool results,
+    17→//     catalog views, and logs never contain a credential value.
+    18→//   - Server definitions can be registered from chat ONLY through the
+    19→//     admin-gated lumo__server_add tool, which reuses the exact admin save
+    20→//     path (registerServerDef callback) — same validation, caps and secret
+    21→//     handling as an admin-panel save. Non-admins are refused; agent input
+    22→//     can never set ids, per-tool permissions, or the trustedLocal SSRF
+    23→//     escape hatch.
+    24→//   - One-time flows: every flow token/state is single-use and expiring.
+    25→//
+    26→// State machine:
+    27→//   available (implicit: no record) → authorizing → connected → ready
+    28→//       authorizing/connected → failed | needs_reauth
+    29→//       ready → (revoke) → revoked;   failed/needs_reauth → authorizing (retry)
+    30→
+    31→'use strict';
+    32→
+    33→const fs = require('fs');
+    34→const path = require('path');
+    35→const crypto = require('crypto');
+    36→const { transportKeyFor } = require('./mcp-manager.cjs');
+    37→const { lookupServiceRecipe } = require('./service-registry.cjs');
+    38→
+    39→const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;   // authorization round-trip budget
+    40→const SETUP_FLOW_TTL_MS = 15 * 60 * 1000;    // API-key form budget
+    41→const CONTROL_PREFIX = 'lumo__';
+    42→
+    43→const CONTROL_SYSTEM_NOTE = [
+    44→    'Connection management (lumo__ tools):',
+    45→    '- When the user asks about connected services, or wants to connect, reconnect, or disconnect one, call lumo__connections_list first.',
+    46→    '- FULL AUTOMATION POLICY: you CAN add new MCP connections yourself — never say you cannot, and never tell the user to contact an administrator. If no connection matches, call lumo__service_lookup with the product name; if there is no recipe, build the definition from the details the user provided (or the provider\'s official MCP documentation) and call lumo__server_add yourself: transport "http" with the MCP endpoint URL for hosted servers, or "stdio" with command/args/env for local ones.',
+    47→    '- After registering a server: for auth "none" it is usable immediately (verify with lumo__connection_status). For auth "api_key", if the user already pasted a key in this chat, store it with lumo__connection_submit_key — pass it verbatim and never repeat it back. Otherwise call lumo__connection_connect and give the user the setup URL from the result. For auth "oauth", call lumo__connection_connect and hand over the authorize URL.',
+    48→    '- If a provider needs extra non-secret inputs (workspace slugs, org ids, instance URLs), ask the user for them, then pass them as static headers or env when calling lumo__server_add. NEVER put secrets in headers/env — credentials only via lumo__connection_submit_key or the setup URL.',
+    49→    '- lumo__connection_disconnect permanently deletes the stored credential: before the FIRST disconnect call in a turn, ask a yes/no confirmation and pass confirm:true only after an explicit affirmative REPLY. Connecting needs no extra confirmation.',
+    50→    '- NEVER claim a connection succeeded until lumo__connection_status reports "ready". After every lumo__server_add or key submission, verify with lumo__connection_status and report the honest status.',
+    51→    '- Never ask the user to paste API keys — but if the user already included one in their message, accept it via lumo__connection_submit_key instead of refusing or redirecting them elsewhere.',
+    52→    '- Status values: available (registered, not yet connected), authorizing (waiting for the user to finish authorization), ready (validated and usable), failed (recoverable; retry connect), needs_reauth (credential rejected; connect again), revoked.',
+    53→].join('\n');
+    54→
+    55→const CONTROL_TOOL_DEFS = [
+    56→    {
+    57→        type: 'function',
+    58→        function: {
+    59→            name: `${CONTROL_PREFIX}connections_list`,
+    60→            description: 'List every MCP connection available on this Lumo instance: id, name, auth type, the current user\'s connection status, and available tools. Always call this before connecting anything or when the user asks about their connected services.',
+    61→            parameters: { type: 'object', properties: {}, additionalProperties: false },
+    62→        },
+    63→    },
+    64→    {
+    65→        type: 'function',
+    66→        function: {
+    67→            name: `${CONTROL_PREFIX}connection_connect`,
+    68→            description: 'Start (or retry) connecting the current user to an MCP connection by serverId from connections_list. For API-key and OAuth connections the result contains a URL the user must open in their browser to authorize. Only pass confirm:true after the user explicitly agreed in chat.',
+    69→            parameters: {
+    70→                type: 'object',
+    71→                properties: {
+    72→                    serverId: { type: 'string', description: 'The serverId from lumo__connections_list' },
+    73→                    confirm: { type: 'boolean', description: 'True only after the user confirmed in chat' },
+    74→                },
+    75→                required: ['serverId', 'confirm'],
+    76→                additionalProperties: false,
+    77→            },
+    78→        },
+    79→    },
+    80→    {
+    81→        type: 'function',
+    82→        function: {
+    83→            name: `${CONTROL_PREFIX}connection_status`,
+    84→            description: 'Check the honest current status of one of the user\'s MCP connections and which tools are available. Use this to verify a connection finished authorizing before telling the user anything succeeded.',
+    85→            parameters: {
+    86→                type: 'object',
+    87→                properties: { serverId: { type: 'string' } },
+    88→                required: ['serverId'],
+    89→                additionalProperties: false,
+    90→            },
+    91→        },
+    92→    },
+    93→    {
+    94→        type: 'function',
+    95→        function: {
+    96→            name: `${CONTROL_PREFIX}connection_disconnect`,
+    97→            description: 'Revoke the current user\'s connection to an MCP server and permanently delete its stored credential. Only pass confirm:true after the user explicitly agreed in chat.',
+    98→            parameters: {
+    99→                type: 'object',
+   100→                properties: {
+   101→                    serverId: { type: 'string' },
+   102→                    confirm: { type: 'boolean', description: 'True only after the user confirmed in chat' },
+   103→                },
+   104→                required: ['serverId', 'confirm'],
+   105→                additionalProperties: false,
+   106→            },
+   107→        },
+   108→    },
+   109→    {
+   110→        type: 'function',
+   111→        function: {
+   112→            name: `${CONTROL_PREFIX}service_lookup`,
+   113→            description: 'Look up a service by product name in the built-in catalog of well-known MCP endpoints. Returns a connection recipe (transport, endpoint URL, auth type, header names — never secrets) or found:false with guidance to register the server yourself via lumo__server_add.',
+   114→            parameters: {
+   115→                type: 'object',
+   116→                properties: {
+   117→                    query: { type: 'string', description: 'Service or product name, e.g. "Plane", "Notion", "Jira"' },
+   118→                },
+   119→                required: ['query'],
+   120→                additionalProperties: false,
+   121→            },
+   122→        },
+   123→    },
+   124→    {
+   125→        type: 'function',
+   126→        function: {
+   127→            name: `${CONTROL_PREFIX}server_add`,
+   128→            description: 'Register a NEW MCP server definition on this instance so it can be connected and used in chats (admin instances only). Supports transport "http" (Streamable HTTP / SSE hosted endpoints; requires url) and "stdio" (local command servers; requires command, optional args/cwd/env). Auth: "none" (shared, no per-user credential), "api_key" (per-user credential injected into authHeaderName with authHeaderPrefix — use an empty prefix for raw-key headers like X-API-Key), or "oauth" (authorizeUrl/tokenUrl/clientId required). Secrets NEVER go here — API keys are stored afterwards via lumo__connection_submit_key or the setup URL from lumo__connection_connect. Returns the new serverId.',
+   129→            parameters: {
+   130→                type: 'object',
+   131→                properties: {
+   132→                    name: { type: 'string', description: 'Display name, e.g. "Plane.so"' },
+   133→                    transport: { type: 'string', enum: ['http', 'stdio'], description: 'Default "http"' },
+   134→                    url: { type: 'string', description: 'http(s) MCP endpoint URL (http transport)' },
+   135→                    headers: { type: 'object', description: 'Static non-secret headers for the http transport, e.g. {"X-Workspace-slug":"acme"}. Never place credentials here.' },
+   136→                    command: { type: 'string', description: 'Executable to run (stdio transport)' },
+   137→                    args: { type: 'array', items: { type: 'string' }, description: 'Command arguments (stdio transport)' },
+   138→                    cwd: { type: 'string', description: 'Working directory (stdio transport)' },
+   139→                    env: { type: 'object', description: 'Environment variables (stdio transport). Never place secret credentials here.' },
+   140→                    auth: { type: 'string', enum: ['none', 'api_key', 'oauth'], description: 'Default "none"' },
+   141→                    authHeaderName: { type: 'string', description: 'Header carrying the per-user credential (api_key), default "Authorization"' },
+   142→                    authHeaderPrefix: { type: 'string', description: 'Prefix before the credential value, e.g. "Bearer"; pass "" for raw keys (X-API-Key style)' },
+   143→                    oauth: {
+   144→                        type: 'object',
+   145→                        properties: {
+   146→                            authorizeUrl: { type: 'string' },
+   147→                            tokenUrl: { type: 'string' },
+   148→                            clientId: { type: 'string' },
+   149→                            clientSecret: { type: 'string' },
+   150→                            scopes: { type: 'string' },
+   151→                            usePkce: { type: 'boolean' },
+   152→                        },
+   153→                        description: 'OAuth endpoints + client config (auth "oauth")',
+   154→                    },
+   155→                },
+   156→                required: ['name'],
+   157→                additionalProperties: false,
+   158→            },
+   159→        },
+   160→    },
+   161→    {
+   162→        type: 'function',
+   163→        function: {
+   164→            name: `${CONTROL_PREFIX}connection_submit_key`,
+   165→            description: 'Store an API key that the user explicitly provided in chat for an api_key connection, then validate the connection end-to-end. The key is encrypted at rest and never echoed. Use ONLY when the user already volunteered the key in this conversation or explicitly asked you to store it; otherwise use lumo__connection_connect to get a setup URL instead of asking for the key.',
+   166→            parameters: {
+   167→                type: 'object',
+   168→                properties: {
+   169→                    serverId: { type: 'string', description: 'The serverId from lumo__connections_list or lumo__server_add' },
+   170→                    key: { type: 'string', description: 'The API key, verbatim — never transcribe a modified or partial key' },
+   171→                },
+   172→                required: ['serverId', 'key'],
+   173→                additionalProperties: false,
+   174→            },
+   175→        },
+   176→    },
+   177→];
+   178→
+   179→function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
+   180→function s256(verifier) { return b64url(crypto.createHash('sha256').update(verifier).digest()); }
+   181→function randomToken(bytes = 24) { return crypto.randomBytes(bytes).toString('hex'); }
+   182→
+   183→// `store` is the SQLite store handle from store.cjs (the mcp_connections
+   184→// table); `dataDir` still locates secret.key, which deliberately stays a
+   185→// plain 0600 file so the encryption key never lives beside the ciphertext.
+   186→function createConnectionService({ dataDir, log, nowIso, store, getServerDef, mcpManager, registerServerDef }) {
+   187→    const SECRET_KEY_FILE = path.join(dataDir, 'secret.key');
+   188→
+   189→    const say = (...a) => { try { log && log(...a); } catch { /* logging never throws */ } };
+   190→
+   191→    // ── credential encryption (AES-256-GCM, key material in data/secret.key) ──
+   192→    let secretKey = null;
+   193→    function ensureSecretKey() {
+   194→        if (secretKey) return secretKey;
+   195→        try {
+   196→            const buf = fs.readFileSync(SECRET_KEY_FILE);
+   197→            if (buf.length === 32) { secretKey = buf; return secretKey; }
+   198→        } catch { /* first use */ }
+   199→        secretKey = crypto.randomBytes(32);
+   200→        try { fs.writeFileSync(SECRET_KEY_FILE, secretKey, { mode: 0o600 }); } catch (e) {
+   201→            say(`[MCP-CONN] WARNING: could not persist secret key: ${e && e.message}`);
+   202→        }
+   203→        return secretKey;
+   204→    }
+   205→    function encryptCredential(plainText) {
+   206→        const key = ensureSecretKey();
+   207→        const iv = crypto.randomBytes(12);
+   208→        const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+   209→        const ct = Buffer.concat([cipher.update(String(plainText), 'utf8'), cipher.final()]);
+   210→        const tag = cipher.getAuthTag();
+   211→        return `v1:${iv.toString('base64')}:${tag.toString('base64')}:${ct.toString('base64')}`;
+   212→    }
+   213→    function decryptCredential(blob) {
+   214→        if (typeof blob !== 'string' || !blob.startsWith('v1:')) return null;
+   215→        const [, ivB64, tagB64, ctB64] = blob.split(':');
+   216→        try {
+   217→            const decipher = crypto.createDecipheriv('aes-256-gcm', ensureSecretKey(), Buffer.from(ivB64, 'base64'));
+   218→            decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+   219→            return Buffer.concat([decipher.update(Buffer.from(ctB64, 'base64')), decipher.final()]).toString('utf8');
+   220→        } catch {
+   221→            return null; // tampered or wrong key -> treat as no credential
+   222→        }
+   223→    }
+   224→
+   225→    // ── connection records (rows in the store's mcp_connections table; a
+   226→    // write touches exactly one record instead of rewriting the whole store) ─
+   227→    function loadRecords() {
+   228→        return store.listConnectionRecords().filter((c) => c && typeof c === 'object' && c.id && c.serverId);
+   229→    }
+   230→
+   231→    function recordView(rec) {
+   232→        return {
+   233→            id: rec.id,
+   234→            serverId: rec.serverId,
+   235→            ownerUid: rec.ownerUid,
+   236→            status: rec.status,
+   237→            error: rec.error || null,
+   238→            createdAt: rec.createdAt || null,
+   239→            updatedAt: rec.updatedAt || null,
+   240→            lastValidatedAt: rec.lastValidatedAt || null,
+   241→            lastDiscoveredAt: rec.lastDiscoveredAt || null,
+   242→        };
+   243→    }
+   244→
+   245→    // The user's effective connection for a server: own connection wins over
+   246→    // a tenant-scoped one. This is the single multi-user seam.
+   247→    function findConnection(serverId, uid) {
+   248→        return store.findConnectionRecordFor(serverId, uid)
+   249→            || store.findConnectionRecordFor(serverId, 'tenant')
+   250→            || null;
+   251→    }
+   252→
+   253→    function findConnectionById(id) {
+   254→        return store.getConnectionRecord(id);
+   255→    }
+   256→
+   257→    function updateRecord(id, patch) {
+   258→        const rec = store.getConnectionRecord(id);
+   259→        if (!rec) return null;
+   260→        Object.assign(rec, patch, { updatedAt: nowIso() });
+   261→        store.upsertConnectionRecord(rec);
+   262→        return rec;
+   263→    }
+   264→
+   265→    function createRecord(serverId, ownerUid, status) {
+   266→        const rec = {
+   267→            id: `conn-${randomToken(8)}`,
+   268→            serverId,
+   269→            ownerUid,
+   270→            status,
+   271→            credential: null,
+   272→            error: null,
+   273→            createdAt: nowIso(),
+   274→            updatedAt: nowIso(),
+   275→            lastValidatedAt: null,
+   276→            lastDiscoveredAt: null,
+   277→        };
+   278→        store.upsertConnectionRecord(rec);
+   279→        return rec;
+   280→    }
+   281→
+   282→    // ── one-time flows (in-memory; they die with the process by design) ──────
+   283→    const oauthFlows = new Map();  // state -> { serverId, ownerUid, connectionId, verifier, createdAt, used }
+   284→    const setupFlows = new Map();  // flowId -> { serverId, ownerUid, connectionId, createdAt, used }
+   285→
+   286→    function sweepFlows() {
+   287→        const now = Date.now();
+   288→        for (const [k, f] of oauthFlows) if (f.used || now - f.createdAt > OAUTH_STATE_TTL_MS) oauthFlows.delete(k);
+   289→        for (const [k, f] of setupFlows) if (f.used || now - f.createdAt > SETUP_FLOW_TTL_MS) setupFlows.delete(k);
+   290→    }
+   291→
+   292→    // ── status derivation ─────────────────────────────────────────────────────
+   293→    // Maps a live transport state to the honest user-facing catalog status.
+   294→    function mapTransportStatus(st) {
+   295→        if (st === 'connected') return 'ready';
+   296→        if (st === 'error') return 'unavailable';
+   297→        return 'not_discovered'; // disconnected / connecting: nothing discovered yet
+   298→    }
+   299→
+   300→    // Full user-facing view of one server definition (for catalog + control
+   301→    // tools). Tools are names + classification only — never schemas/env.
+   302→    function connectionStatusFor(def, uid) {
+   303→        const entry = def; // raw definition; manager normalizes
+   304→        if (!entry.enabled) return { serverId: entry.id, name: entry.name, auth: entry.auth || 'none', status: 'disabled', tools: null, lastDiscoveredAt: null };
+   305→        if (!entry.auth || entry.auth === 'none') {
+   306→            const st = mcpManager.statusView(entry);
+   307→            return {
+   308→                serverId: entry.id,
+   309→                name: entry.name,
+   310→                auth: 'none',
+   311→                status: mapTransportStatus(st.status),
+   312→                tools: st.status === 'connected' ? st.tools.map((t) => ({ name: t.name, classification: t.classification })) : null,
+   313→                lastDiscoveredAt: st.lastDiscoveredAt,
+   314→            };
+   315→        }
+   316→        const rec = findConnection(entry.id, uid);
+   317→        if (!rec) return { serverId: entry.id, name: entry.name, auth: entry.auth, status: 'available', tools: null, lastDiscoveredAt: null };
+   318→        let status = rec.status;
+   319→        let tools = null;
+   320→        if (rec.status === 'ready') {
+   321→            const st = mcpManager.statusView(entry, { connection: { id: rec.id } });
+   322→            if (st.status === 'error') status = 'unavailable';
+   323→            else tools = st.tools.map((t) => ({ name: t.name, classification: t.classification }));
+   324→        }
+   325→        return {
+   326→            serverId: entry.id,
+   327→            name: entry.name,
+   328→            auth: entry.auth,
+   329→            status,
+   330→            error: rec.error || null,
+   331→            tools,
+   332→            lastValidatedAt: rec.lastValidatedAt || null,
+   333→            lastDiscoveredAt: rec.lastDiscoveredAt || null,
+   334→        };
+   335→    }
+   336→
+   337→    // The decrypted credential value for a ready connection (transport header
+   338→    // injection). Returns { id, value } or null. Value never leaves this
+   339→    // module except into the manager's transport builder / redaction set.
+   340→    function findReadyCredential(serverId, uid) {
+   341→        const rec = findConnection(serverId, uid);
+   342→        if (!rec || rec.status !== 'ready' || !rec.credential) return null;
+   343→        const raw = decryptCredential(rec.credential);
+   344→        if (!raw) return null;
+   345→        let parsed;
+   346→        try { parsed = JSON.parse(raw); } catch { return null; }
+   347→        if (!parsed || typeof parsed.value !== 'string' || !parsed.value) return null;
+   348→        return { id: rec.id, value: parsed.value };
+   349→    }
+   350→
+   351→    // ── validation: a connection is ready only after a REAL connect + discovery
+   352→    async function validateConnection(rec, def) {
+   353→        let credential = null;
+   354→        try { credential = JSON.parse(decryptCredential(rec.credential) || 'null'); } catch { credential = null; }
+   355→        const credValue = credential && typeof credential.value === 'string' ? credential.value : '';
+   356→        updateRecord(rec.id, { status: 'connected', error: null });
+   357→        try {
+   358→            // explicit discovering state: the connect succeeded, now we're
+   359→            // enumerating tools. This makes the lifecycle honest and visible:
+   360→            //   connected → discovering → ready (or failed)
+   361→            updateRecord(rec.id, { status: 'discovering', error: null });
+   362→            await mcpManager.connect(def, { force: true, connection: { id: rec.id, credential: credValue } });
+   363→            const st = mcpManager.statusView(def, { connection: { id: rec.id } });
+   364→            // ready only after a REAL connect + tool discovery: the manager
+   365→            // stamps lastDiscoveredAt solely when tools/list actually answered,
+   366→            // so a transport that connects but cannot be enumerated never
+   367→            // reaches ready (no fake success)
+   368→            if (st.status === 'connected' && st.lastDiscoveredAt) {
+   369→                updateRecord(rec.id, {
+   370→                    status: 'ready',
+   371→                    error: null,
+   372→                    lastValidatedAt: nowIso(),
+   373→                    lastDiscoveredAt: st.lastDiscoveredAt,
+   374→                });
+   375→                say(`[MCP-CONN] connection ready: ${def.name} (${def.id}) owner=${rec.ownerUid} tools=${st.tools.length}`);
+   376→            } else {
+   377→                const code = st.status === 'connected' ? 'discovery_failed' : 'validation_failed';
+   378→                updateRecord(rec.id, { status: 'failed', error: { code } });
+   379→                say(`[MCP-CONN] connection validation failed: ${def.name} (${def.id}): ${code}`);
+   380→            }
+   381→        } catch (e) {
+   382→            const msg = String((e && e.message) || '');
+   383→            const code = /401|403|unauthorized|invalid[_ ]?token|bad credentials|invalid api key/i.test(msg)
+   384→                ? 'auth_rejected' : 'validation_failed';
+   385→            updateRecord(rec.id, { status: code === 'auth_rejected' ? 'needs_reauth' : 'failed', error: { code } });
+   386→            say(`[MCP-CONN] connection validation failed: ${def.name} (${def.id}): ${mcpManager.redact(msg)}`);
+   387→        }
+   388→        return findConnectionById(rec.id);
+   389→    }
+   390→
+   391→    // ── lifecycle operations (used by control tools AND HTTP endpoints) ──────
+   392→    async function startConnect({ serverId, uid, confirm, baseUrl }) {
+   393→        sweepFlows();
+   394→        // per-uid cap on live authorization flows: the TTL sweep bounds the map
+   395→        // overall, this bounds how many one account can have open at once
+   396→        let liveFlows = 0;
+   397→        for (const f of oauthFlows.values()) if (f.ownerUid === uid) liveFlows++;
+   398→        for (const f of setupFlows.values()) if (f.ownerUid === uid) liveFlows++;
+   399→        if (liveFlows >= 20) {
+   400→            return { ok: false, error: 'too_many_flows', message: 'Too many pending authorizations for this account. Finish or let one expire, then try again.' };
+   401→        }
+   402→        const def = getServerDef(String(serverId || ''));
+   403→        if (!def) return { ok: false, error: 'unknown_connection', message: 'No MCP connection with that id is configured on this instance. The administrator must add it first.' };
+   404→        if (!def.enabled) return { ok: false, error: 'disabled', message: `"${def.name}" is disabled by the administrator.` };
+   405→        const auth = def.auth || 'none';
+   406→        if (auth === 'none') {
+   407→            return { ok: true, serverId: def.id, name: def.name, status: 'ready', message: `"${def.name}" is instance-shared (administrator-managed credentials) — its tools are already available in chats; no personal connection is needed.` };
+   408→        }
+   409→        if (confirm !== true) {
+   410→            return { ok: false, needsConfirmation: true, serverId: def.id, name: def.name, message: `Ask the user to confirm connecting to "${def.name}" before proceeding.` };
+   411→        }
+   412→        let rec = findConnection(def.id, uid);
+   413→        if (rec && rec.status === 'ready' && findReadyCredential(def.id, uid)) {
+   414→            return { ok: true, serverId: def.id, name: def.name, status: 'ready', message: `"${def.name}" is already connected.` };
+   415→        }
+   416→        if (!rec) rec = createRecord(def.id, uid, 'authorizing');
+   417→        else updateRecord(rec.id, { status: 'authorizing', error: null });
+   418→
+   419→        if (auth === 'api_key') {
+   420→            const flowId = randomToken(24);
+   421→            setupFlows.set(flowId, { serverId: def.id, ownerUid: uid, connectionId: rec.id, createdAt: Date.now(), used: false });
+   422→            const setupUrl = `${baseUrl}/mcp/setup/${flowId}`;
+   423→            say(`[MCP-CONN] api-key flow started: ${def.id} owner=${uid} flow=${flowId.slice(0, 8)}…`);
+   424→            return { ok: true, serverId: def.id, name: def.name, status: 'authorizing', setupUrl, message: `Give this URL to the user: they must open it in a browser and enter their API key there. Never ask for the key in chat. Then verify with connection_status before claiming success.` };
+   425→        }
+   426→        // oauth
+   427→        const cfg = def.oauth || {};
+   428→        if (!cfg.authorizeUrl || !cfg.tokenUrl || !cfg.clientId) {
+   429→            updateRecord(rec.id, { status: 'failed', error: { code: 'misconfigured' } });
+   430→            return { ok: false, error: 'misconfigured', message: `"${def.name}" has an incomplete OAuth configuration; the administrator must fix it.` };
+   431→        }
+   432→        const state = randomToken(24);
+   433→        const verifier = b64url(crypto.randomBytes(32));
+   434→        oauthFlows.set(state, { serverId: def.id, ownerUid: uid, connectionId: rec.id, verifier, createdAt: Date.now(), used: false });
+   435→        const u = new URL(cfg.authorizeUrl);
+   436→        u.searchParams.set('response_type', 'code');
+   437→        u.searchParams.set('client_id', cfg.clientId);
+   438→        u.searchParams.set('redirect_uri', `${baseUrl}/mcp/oauth/callback`);
+   439→        u.searchParams.set('state', state);
+   440→        if (cfg.scopes) u.searchParams.set('scope', cfg.scopes);
+   441→        if (cfg.usePkce !== false) {
+   442→            u.searchParams.set('code_challenge', s256(verifier));
+   443→            u.searchParams.set('code_challenge_method', 'S256');
+   444→        }
+   445→        say(`[MCP-CONN] oauth flow started: ${def.id} owner=${uid} state=${state.slice(0, 8)}…`);
+   446→        return { ok: true, serverId: def.id, name: def.name, status: 'authorizing', authorizeUrl: u.toString(), message: `Give this authorization URL to the user: they must open it, approve access, and they will land back on this instance. Then verify with connection_status before claiming success.` };
+   447→    }
+   448→
+   449→    async function completeOAuth({ state, code, error, baseUrl }) {
+   450→        sweepFlows();
+   451→        if (!state) return { ok: false, page: 'error', code: 'invalid_state' };
+   452→        const flow = oauthFlows.get(state);
+   453→        if (!flow || flow.used) return { ok: false, page: 'error', code: 'invalid_state' };
+   454→        if (error || !code) {
+   455→            // the user denied (or abandoned) the authorization at the provider:
+   456→            // consume the one-time state, record the honest recoverable state,
+   457→            // and never store a credential
+   458→            oauthFlows.delete(state);
+   459→            const rec = findConnectionById(flow.connectionId);
+   460→            if (rec && rec.ownerUid === flow.ownerUid) {
+   461→                updateRecord(rec.id, { status: 'failed', error: { code: 'auth_denied' } });
+   462→            }
+   463→            say(`[MCP-CONN] oauth ${error ? `denied (${String(error).slice(0, 40)})` : 'abandoned'}: ${flow.serverId} owner=${flow.ownerUid}`);
+   464→            const def = getServerDef(flow.serverId);
+   465→            return { ok: false, page: 'denied', code: 'auth_denied', name: def ? def.name : undefined };
+   466→        }
+   467→        oauthFlows.delete(state); // one-time use, even before validation succeeds
+   468→        const def = getServerDef(flow.serverId);
+   469→        if (!def) return { ok: false, page: 'error', code: 'unknown_connection' };
+   470→        const rec = findConnectionById(flow.connectionId);
+   471→        if (!rec || rec.ownerUid !== flow.ownerUid) return { ok: false, page: 'error', code: 'invalid_state' };
+   472→        const cfg = def.oauth || {};
+   473→        try {
+   474→            const form = new URLSearchParams();
+   475→            form.set('grant_type', 'authorization_code');
+   476→            form.set('code', String(code));
+   477→            form.set('redirect_uri', `${baseUrl}/mcp/oauth/callback`);
+   478→            form.set('client_id', cfg.clientId);
+   479→            if (cfg.clientSecret) form.set('client_secret', cfg.clientSecret);
+   480→            if (cfg.usePkce !== false) form.set('code_verifier', flow.verifier);
+   481→            const resp = await fetch(cfg.tokenUrl, {
+   482→                method: 'POST',
+   483→                headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+   484→                body: form.toString(),
+   485→                signal: AbortSignal.timeout(15000),
+   486→            });
+   487→            if (!resp.ok) throw new Error(`token endpoint ${resp.status}`);
+   488→            const tok = await resp.json();
+   489→            if (!tok || typeof tok.access_token !== 'string' || !tok.access_token) throw new Error('no access_token in token response');
+   490→            const credential = { type: 'oauth', value: tok.access_token, refreshToken: typeof tok.refresh_token === 'string' ? tok.refresh_token : null };
+   491→            updateRecord(rec.id, { credential: encryptCredential(JSON.stringify(credential)) });
+   492→            mcpManager.registerSecretValue(tok.access_token);
+   493→            const finalRec = await validateConnection(findConnectionById(rec.id), def);
+   494→            return { ok: finalRec.status === 'ready', page: finalRec.status === 'ready' ? 'ready' : 'failed', status: finalRec.status, name: def.name, error: finalRec.error };
+   495→        } catch (e) {
+   496→            updateRecord(rec.id, { status: 'failed', error: { code: 'oauth_exchange_failed' } });
+   497→            say(`[MCP-CONN] oauth exchange failed: ${def.id}: ${mcpManager.redact(String((e && e.message) || e))}`);
+   498→            return { ok: false, page: 'failed', code: 'oauth_exchange_failed', name: def.name };
+   499→        }
+   500→    }
+   501→
+   502→    async function completeSetup({ flowId, keyValue }) {
+   503→        sweepFlows();
+   504→        const flow = setupFlows.get(String(flowId || ''));
+   505→        if (!flow || flow.used) return { ok: false, page: 'error', code: 'invalid_flow' };
+   506→        const key = String(keyValue || '').trim();
+   507→        if (!key) return { ok: false, page: 'form', code: 'missing_key' };
+   508→        setupFlows.delete(flowId); // one-time use
+   509→        const def = getServerDef(flow.serverId);
+   510→        if (!def) return { ok: false, page: 'error', code: 'unknown_connection' };
+   511→        const rec = findConnectionById(flow.connectionId);
+   512→        if (!rec || rec.ownerUid !== flow.ownerUid) return { ok: false, page: 'error', code: 'invalid_flow' };
+   513→        const credential = { type: 'api_key', value: key };
+   514→        updateRecord(rec.id, { credential: encryptCredential(JSON.stringify(credential)) });
+   515→        mcpManager.registerSecretValue(key);
+   516→        const finalRec = await validateConnection(findConnectionById(rec.id), def);
+   517→        return { ok: finalRec.status === 'ready', page: finalRec.status === 'ready' ? 'ready' : 'failed', status: finalRec.status, name: def.name, error: finalRec.error };
+   518→    }
+   519→
+   520→    async function disconnectConnection({ serverId, uid, confirm }) {
+   521→        const def = getServerDef(String(serverId || ''));
+   522→        if (!def) return { ok: false, error: 'unknown_connection', message: 'No MCP connection with that id is configured on this instance.' };
+   523→        if (confirm !== true) {
+   524→            return { ok: false, needsConfirmation: true, serverId: def.id, name: def.name, message: `Ask the user to confirm disconnecting "${def.name}" before proceeding. This deletes the stored credential.` };
+   525→        }
+   526→        const rec = findConnection(def.id, uid);
+   527→        if (!rec || rec.status === 'revoked') {
+   528→            return { ok: true, serverId: def.id, name: def.name, status: 'available', message: `"${def.name}" had no active user connection.` };
+   529→        }
+   530→        updateRecord(rec.id, { status: 'revoked', credential: null, error: null });
+   531→        try { await mcpManager.disconnect(transportKeyFor(def.id, rec.id), { silent: true }); } catch { /* already dead */ }
+   532→        say(`[MCP-CONN] connection revoked: ${def.id} owner=${rec.ownerUid}`);
+   533→        return { ok: true, serverId: def.id, name: def.name, status: 'revoked', message: `"${def.name}" is disconnected; the stored credential was deleted.` };
+   534→    }
+   535→
+   536→    // API key submitted from chat (lumo__connection_submit_key): the user
+   537→    // volunteered the key in the conversation, so we accept it directly —
+   538→    // encrypt, store, validate. The value never re-enters a tool result.
+   539→    async function submitKey({ serverId, uid, key }) {
+   540→        sweepFlows();
+   541→        const def = getServerDef(String(serverId || ''));
+   542→        if (!def) return { ok: false, error: 'unknown_connection', message: 'No MCP connection with that id is registered on this instance. Register it first with lumo__server_add.' };
+   543→        if (!def.enabled) return { ok: false, error: 'disabled', message: `"${def.name}" is disabled.` };
+   544→        if ((def.auth || 'none') !== 'api_key') {
+   545→            return { ok: false, error: 'not_api_key', message: `"${def.name}" uses "${def.auth || 'none'}" auth, so chat key submission does not apply. Use lumo__connection_connect instead.` };
+   546→        }
+   547→        const value = String(key || '').trim();
+   548→        if (!value) return { ok: false, error: 'missing_key', message: 'The provided key was empty. Ask the user for the exact key value.' };
+   549→        if (value.length > 4096) return { ok: false, error: 'key_too_long', message: 'That key is implausibly long (>4096 chars); refuse it.' };
+   550→        let rec = findConnection(def.id, uid);
+   551→        if (!rec) rec = createRecord(def.id, uid, 'authorizing');
+   552→        else updateRecord(rec.id, { status: 'authorizing', error: null });
+   553→        updateRecord(rec.id, { credential: encryptCredential(JSON.stringify({ type: 'api_key', value })) });
+   554→        mcpManager.registerSecretValue(value);
+   555→        say(`[MCP-CONN] api key submitted from chat: ${def.id} owner=${uid}`);
+   556→        const finalRec = await validateConnection(findConnectionById(rec.id), def);
+   557→        const okFlag = finalRec.status === 'ready';
+   558→        return {
+   559→            ok: okFlag,
+   560→            serverId: def.id,
+   561→            name: def.name,
+   562→            status: finalRec.status,
+   563→            error: finalRec.error || null,
+   564→            message: okFlag
+   565→                ? `"${def.name}" is connected and ready. Verify with lumo__connection_status and tell the user which tools are now available.`
+   566→                : `The key was stored but validation failed (${(finalRec.error && finalRec.error.code) || 'unknown'}). Report this honestly; retry with connection_status, a corrected key, or lumo__connection_connect for a setup URL.`,
+   567→        };
+   568→    }
+   569→
+   570→    // Admin override: revoke any record by id (no ownership check — admin only
+   571→    // route in lumo-server.cjs). Credential wiped, transport closed.
+   572→    async function revokeById(id) {
+   573→        const rec = findConnectionById(String(id || ''));
+   574→        if (!rec) return null;
+   575→        updateRecord(rec.id, { status: 'revoked', credential: null, error: null });
+   576→        try { await mcpManager.disconnect(transportKeyFor(rec.serverId, rec.id), { silent: true }); } catch { /* already dead */ }
+   577→        say(`[MCP-CONN] connection revoked by admin: ${rec.serverId} owner=${rec.ownerUid}`);
+   578→        return findConnectionById(rec.id);
+   579→    }
+   580→
+   581→    // ── agent control plane ───────────────────────────────────────────────────
+   582→    function controlToolDefs() { return CONTROL_TOOL_DEFS; }
+   583→
+   584→    function connectionsListFor(uid) {
+   585→        return {
+   586→            connections: loadDefs().map((def) => {
+   587→                const v = connectionStatusFor(def, uid);
+   588→                return {
+   589→                    serverId: v.serverId,
+   590→                    name: v.name,
+   591→                    auth: v.auth,
+   592→                    status: v.status,
+   593→                    error: v.error || null,
+   594→                    tools: v.tools,
+   595→                };
+   596→            }),
+   597→        };
+   598→    }
+   599→
+   600→    // Definitions come from the server (admin-owned allowlist); the service
+   601→    // never mutates them.
+   602→    let defsProvider = () => [];
+   603→    function setDefsProvider(fn) { defsProvider = fn; }
+   604→    function loadDefs() { return defsProvider() || []; }
+   605→
+   606→    // Returns { isError, text } for the chat loop. Text is JSON; it never
+   607→    // contains credential material.
+   608→    async function executeControlTool({ name, args, uid, baseUrl, isAdmin }) {
+   609→        const a = args && typeof args === 'object' ? args : {};
+   610→        try {
+   611→            if (name === `${CONTROL_PREFIX}connections_list`) {
+   612→                return { isError: false, text: JSON.stringify(connectionsListFor(uid)) };
+   613→            }
+   614→            if (name === `${CONTROL_PREFIX}service_lookup`) {
+   615→                return { isError: false, text: JSON.stringify(lookupServiceRecipe(a.query)) };
+   616→            }
+   617→            if (name === `${CONTROL_PREFIX}server_add`) {
+   618→                if (isAdmin !== true) {
+   619→                    return { isError: true, text: JSON.stringify({ ok: false, error: 'admin_required', message: 'Registering MCP servers is restricted to admin accounts on this instance. Tell the user honestly; do not retry.' }) };
+   620→                }
+   621→                if (typeof registerServerDef !== 'function') {
+   622→                    return { isError: true, text: JSON.stringify({ ok: false, error: 'unavailable', message: 'Server registration is not wired up on this instance.' }) };
+   623→                }
+   624→                const r = await registerServerDef(a);
+   625→                return { isError: r.ok === false, text: JSON.stringify(r) };
+   626→            }
+   627→            if (name === `${CONTROL_PREFIX}connection_submit_key`) {
+   628→                const r = await submitKey({ serverId: a.serverId, uid, key: a.key });
+   629→                return { isError: r.ok === false, text: JSON.stringify(r) };
+   630→            }
+   631→            if (name === `${CONTROL_PREFIX}connection_connect`) {
+   632→                const r = await startConnect({ serverId: a.serverId, uid, confirm: a.confirm === true, baseUrl });
+   633→                return { isError: r.ok === false && !r.needsConfirmation, text: JSON.stringify(r) };
+   634→            }
+   635→            if (name === `${CONTROL_PREFIX}connection_status`) {
+   636→                const def = getServerDef(String(a.serverId || ''));
+   637→                if (!def) return { isError: true, text: JSON.stringify({ ok: false, error: 'unknown_connection' }) };
+   638→                // Shared (auth "none") servers have no personal connection
+   639→                // record: their readiness IS the live transport. An explicit
+   640→                // status check is therefore the right place to force the
+   641→                // first connect + discovery (best-effort) — after
+   642→                // lumo__server_add the agent can prove readiness in the same
+   643→                // turn instead of reporting a misleading "not_discovered".
+   644→                if (def.enabled && (!def.auth || def.auth === 'none')) {
+   645→                    try { await mcpManager.connect(def, { force: false }); } catch { /* statusView reports the honest error */ }
+   646→                }
+   647→                const v = connectionStatusFor(def, uid);
+   648→                return { isError: false, text: JSON.stringify(v) };
+   649→            }
+   650→            if (name === `${CONTROL_PREFIX}connection_disconnect`) {
+   651→                const r = await disconnectConnection({ serverId: a.serverId, uid, confirm: a.confirm === true });
+   652→                return { isError: r.ok === false && !r.needsConfirmation, text: JSON.stringify(r) };
+   653→            }
+   654→            return { isError: true, text: JSON.stringify({ ok: false, error: 'unknown_control_tool' }) };
+   655→        } catch (e) {
+   656→            say(`[MCP-CONN] control tool ${name} failed:`, mcpManager.redact(String((e && e.message) || e)));
+   657→            return { isError: true, text: JSON.stringify({ ok: false, error: 'internal_error' }) };
+   658→        }
+   659→    }
+   660→
+   661→    // ── minimal public API for pages (used by the oauth/setup endpoints) ─────
+   662→    function getSetupFlow(flowId) {
+   663→        sweepFlows();
+   664→        const f = setupFlows.get(String(flowId || ''));
+   665→        return f ? { serverId: f.serverId, ownerUid: f.ownerUid, connectionId: f.connectionId } : null;
+   666→    }
+   667→
+   668→    // ── in-app API-key connection (no external HTML page needed) ────────────
+   669→    // Combines startConnect + completeSetup into one call so the settings UI
+   670→    // can connect an api_key server without navigating to /mcp/setup/<flow>.
+   671→    // For oauth servers, returns the authorizeUrl so the UI can open it.
+   672→    async function connectInApp({ serverId, uid, apiKey, baseUrl }) {
+   673→        const def = getServerDef(String(serverId || ''));
+   674→        if (!def) return { ok: false, error: 'unknown_connection', message: 'No MCP server with that id.' };
+   675→        if (!def.enabled) return { ok: false, error: 'disabled', message: `"${def.name}" is disabled.` };
+   676→        const auth = def.auth || 'none';
+   677→        if (auth === 'none') {
+   678→            return { ok: true, serverId: def.id, name: def.name, status: 'ready', message: `"${def.name}" is instance-shared — no personal connection needed.` };
+   679→        }
+   680→        // For api_key: create flow + complete it in one step
+   681→        if (auth === 'api_key') {
+   682→            const key = String(apiKey || '').trim();
+   683→            if (!key) return { ok: false, error: 'missing_key', message: 'An API key is required.' };
+   684→            let rec = findConnection(def.id, uid);
+   685→            if (!rec) rec = createRecord(def.id, uid, 'authorizing');
+   686→            else updateRecord(rec.id, { status: 'authorizing', error: null });
+   687→            const flowId = randomToken(24);
+   688→            setupFlows.set(flowId, { serverId: def.id, ownerUid: uid, connectionId: rec.id, createdAt: Date.now(), used: false });
+   689→            say(`[MCP-CONN] in-app api-key flow: ${def.id} owner=${uid} flow=${flowId.slice(0, 8)}…`);
+   690→            const r = await completeSetup({ flowId, keyValue: key });
+   691→            return { ok: r.ok, serverId: def.id, name: def.name, status: r.status || (r.ok ? 'ready' : 'failed'), error: r.error, message: r.ok ? `"${def.name}" is connected and ready.` : `Connection failed: ${r.error ? r.error.code : 'unknown error'}` };
+   692→        }
+   693→        // For oauth: return the authorize URL (UI opens it in a new tab)
+   694→        if (auth === 'oauth') {
+   695→            const start = await startConnect({ serverId: def.id, uid, confirm: true, baseUrl });
+   696→            if (!start.ok) return start;
+   697→            return { ok: true, serverId: def.id, name: def.name, status: 'authorizing', authorizeUrl: start.authorizeUrl || start.setupUrl, message: `Open the authorization URL to connect "${def.name}".` };
+   698→        }
+   699→        return { ok: false, error: 'unsupported_auth', message: `Auth type "${auth}" is not supported for in-app connection.` };
+   700→    }
+   701→
+   702→    return {
+   703→        CONTROL_SYSTEM_NOTE,
+   704→        controlToolDefs,
+   705→        executeControlTool,
+   706→        connectionStatusFor,
+   707→        connectionsListFor,
+   708→        findReadyCredential,
+   709→        startConnect,
+   710→        completeOAuth,
+   711→        completeSetup,
+   712→        submitKey,
+   713→        connectInApp,
+   714→        disconnectConnection,
+   715→        revokeById,
+   716→        getSetupFlow,
+   717→        setDefsProvider,
+   718→        recordView,
+   719→        loadRecords,
+   720→        // test-only: age every live flow's createdAt so the next sweep expires
+   721→        // them (lets tests prove TTL expiry without sleeping real time)
+   722→        _ageFlowsForTest: (ms) => {
+   723→            for (const f of oauthFlows.values()) f.createdAt -= ms;
+   724→            for (const f of setupFlows.values()) f.createdAt -= ms;
+   725→        },
+   726→        _encryptCredential: encryptCredential,
+   727→        _decryptCredential: decryptCredential,
+   728→    };
+   729→}
+   730→
+   731→module.exports = { createConnectionService, CONTROL_PREFIX, OAUTH_STATE_TTL_MS, SETUP_FLOW_TTL_MS };
+   732→
