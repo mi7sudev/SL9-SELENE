@@ -50,5 +50,26 @@ test
 prompt
 
 server.log
+
+# LumoOS vendored app — runtime state and dev-only weight, never commit
+LumoOS/data/
+LumoOS/node_modules/
+LumoOS/**/*.log
+LumoOS/**/*.tmp
+LumoOS/**/*.bak
+LumoOS/.zcode/
+# Source maps are dev-only debug weight (~120MB); the app runs without them
+LumoOS/lumo-dist/**/*.map
+# WebClients is the upstream Proton webclient clone; not needed to run
+LumoOS/WebClients/
+
+# Third-party reference clones kept locally for study only; not part of
+# this product and not needed to run it. Never commit (they are their own
+# git repos — committing them would recreate broken gitlinks).
+/WebClients/
+/android-lumo/
+/mattpocock-skills/
+/proton-mail-android/
+
 # Skills directory
 /skills/

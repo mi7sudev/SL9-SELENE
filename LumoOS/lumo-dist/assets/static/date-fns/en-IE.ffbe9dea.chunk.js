@@ -1,0 +1,2 @@
+"use strict";(globalThis.webpackChunkproton_lumo=globalThis.webpackChunkproton_lumo||[]).push([[1922],{72454(o,t,a){var e=a(86370),n=a(77569),l=a(87465),s=a(62727),i=a(28842),r={code:"en-IE",formatDistance:e.A,formatLong:i.A,formatRelative:n.A,localize:l.A,match:s.A,options:{weekStartsOn:1,firstWeekContainsDate:4}};a.d(t,["default",0,r])}}]);
+//# sourceMappingURL=en-IE.ffbe9dea.chunk.js.map

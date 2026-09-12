@@ -1,0 +1,28 @@
+# Secrets & runtime state: password hashes, the admin's provider apiKey,
+# per-user conversation stores. Never commit these.
+data/
+
+# Logs (request logs include message-body snippets).
+*.log
+
+# Agent session artifacts.
+.zcode/
+
+# Upstream Lumo webclient clone. It contains its own .git (embedded repos
+# break git) plus multi-MB build artifacts. The modifications we make to it
+# are captured by the patch-*.cjs / fix-*.cjs / bust-cache-*.cjs scripts at
+# the repo root, plus harden-v19.cjs.
+WebClients/
+
+# Scratched tooling output.
+*.tmp
+*.bak
+
+# Archived one-shot patch scripts (historical record; superseded by the
+# active chain: patch-admin-ui.cjs, patch-thinking-mode.cjs,
+# patch-v25-providers.cjs, bust-cache-admin.cjs, diag-all-runtime-integrity.cjs).
+/archive/
+
+# npm: the only dependency is the official MCP SDK used by mcp-manager.cjs.
+node_modules/
+package-lock.json

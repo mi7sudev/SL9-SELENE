@@ -1,0 +1,50 @@
+{
+  "script": "patch-mcp-promptbar.cjs",
+  "appliedAt": "2026-09-06T07:25:21.013Z",
+  "files": [
+    {
+      "file": "4206.9903be83.chunk.js",
+      "changed": false,
+      "shaBefore": "795a2984b69e61fd3f5b8102af755cf4b842f184767d5cc1abd62eb37c790070",
+      "shaAfter": "795a2984b69e61fd3f5b8102af755cf4b842f184767d5cc1abd62eb37c790070",
+      "statuses": [
+        {
+          "name": "tmd-state-chain",
+          "status": "chain: already-patched, row: already-patched"
+        },
+        {
+          "name": "tmd-mcp-view",
+          "status": "already-patched"
+        },
+        {
+          "name": "tmd-main-row",
+          "status": "already-patched"
+        }
+      ]
+    },
+    {
+      "file": "1306.43935624.chunk.js",
+      "changed": false,
+      "shaBefore": "3996ed56439420e276651aef91d52d038ad05f8dcf158d362ff888b2152bcfc1",
+      "shaAfter": "3996ed56439420e276651aef91d52d038ad05f8dcf158d362ff888b2152bcfc1",
+      "statuses": [
+        {
+          "name": "body-builder-zap_mcp",
+          "status": "already-patched"
+        }
+      ]
+    },
+    {
+      "file": "4124.6ffe79b5.chunk.js",
+      "changed": false,
+      "shaBefore": "c89c4851173df0036e0ec6c2b8a09b5859821eea634c3116420430f61f17c4dd",
+      "shaAfter": "c89c4851173df0036e0ec6c2b8a09b5859821eea634c3116420430f61f17c4dd",
+      "statuses": [
+        {
+          "name": "body-builder-zap_mcp",
+          "status": "already-patched"
+        }
+      ]
+    }
+  ]
+}

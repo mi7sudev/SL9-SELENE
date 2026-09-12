@@ -1,0 +1,1391 @@
+     1→     1→@file:Suppress("TooManyFunctions")
+     2→     2→package me.proton.android.lumo.webview
+     3→     3→
+     4→     4→import android.webkit.WebView
+     5→     5→import me.proton.android.lumo.config.LumoConfig
+     6→     6→import timber.log.Timber
+     7→     7→
+     8→     8→
+     9→     9→private const val TAG = "JsInjector"
+    10→    10→
+    11→    11→/**
+    12→    12→ * Injects essential JavaScript into the WebView to monitor Lumo container visibility
+    13→    13→ * and handle navigation.
+    14→    14→ */
+    15→    15→@Suppress("LongMethod")
+    16→    16→fun injectEssentialJavascript(webView: WebView) {
+    17→    17→    val js = """
+    18→    18→        (function() {
+    19→    19→            // Function to check if current page is a Lumo page
+    20→    20→            function isLumoPage() {
+    21→    21→                const hasLumoContainer = document.querySelector('.lumo-input-container') !== null;
+    22→    22→                const currentUrl = window.location.href;
+    23→    23→                const isLumoDomain = currentUrl.includes('${LumoConfig.LUMO_DOMAIN}');    
+    24→    24→                return hasLumoContainer || isLumoDomain;
+    25→    25→            }
+    26→    26→            
+    27→    27→            // Function to notify Android about page type
+    28→    28→            function notifyPageType() {
+    29→    29→                const isLumo = isLumoPage();
+    30→    30→                if (window.Android && typeof window.Android.onPageTypeChanged === 'function') {
+    31→    31→                    const currentUrl = window.location.href;
+    32→    32→                    window.Android.onPageTypeChanged(isLumo, currentUrl);
+    33→    33→                }
+    34→    34→            }
+    35→    35→            
+    36→    36→            // Only run container check logic on lumo domain
+    37→    37→            const currentUrl = window.location.href;
+    38→    38→            const isLumoDomain = currentUrl.includes('${LumoConfig.LUMO_DOMAIN}');
+    39→    39→            if (isLumoDomain) {
+    40→    40→                // Function to check for Lumo container
+    41→    41→                function checkLumoContainer() {
+    42→    42→                    console.log('Checking for Lumo container...');
+    43→    43→                    const container = document.querySelector('.lumo-input-container');
+    44→    44→                    console.log('Container found:', container);
+    45→    45→                    
+    46→    46→                    if (container) {
+    47→    47→                        console.log('Lumo container found, notifying Android');
+    48→    48→                        // Unhide the voice entry button if present
+    49→    49→                        var voiceBtn = document.getElementById('voice-entry-mobile');
+    50→    50→                        if (voiceBtn && voiceBtn.classList.contains('hidden')) {
+    51→    51→                            voiceBtn.classList.remove('hidden');
+    52→    52→                            console.log('Unhid #voice-entry-mobile');
+    53→    53→                        }
+    54→    54→                        
+    55→    55→                        // Hide the prompt entry text if present
+    56→    56→                        const promptTextElements = document.getElementsByClassName('prompt-entry-hint');
+    57→    57→                        for (let element of promptTextElements) {
+    58→    58→                            element.style.setProperty('display', 'none', 'important');
+    59→    59→                        }
+    60→    60→                        
+    61→    61→                        // Add click handler to #voice-entry-mobile-button
+    62→    62→                        var voiceBtnAction = document.getElementById('voice-entry-mobile-button');
+    63→    63→                        if (voiceBtnAction && !voiceBtnAction.hasAttribute('data-android-handler')) {
+    64→    64→                            voiceBtnAction.addEventListener('click', function(e) {
+    65→    65→                                console.log('Voice entry button clicked, calling Android.startVoiceEntry()');
+    66→    66→                                if (window.Android && typeof window.Android.startVoiceEntry === 'function') {
+    67→    67→                                    window.Android.startVoiceEntry();
+    68→    68→                                }
+    69→    69→                            });
+    70→    70→                            voiceBtnAction.setAttribute('data-android-handler', 'true');
+    71→    71→                        }
+    72→    72→                        if (window.Android && typeof window.Android.onLumoContainerVisible === 'function') {
+    73→    73→                            console.log('Calling onLumoContainerVisible');
+    74→    74→                            window.Android.onLumoContainerVisible();
+    75→    75→                        } else {
+    76→    76→                            console.error('Android interface or onLumoContainerVisible method not found');
+    77→    77→                        }
+    78→    78→                        return true;
+    79→    79→                    }
+    80→    80→                    console.log('Lumo container not found');
+    81→    81→                    return false;
+    82→    82→                }
+    83→    83→                
+    84→    84→                // Run immediately on page load
+    85→    85→                console.log('Running initial page checks...');
+    86→    86→                notifyPageType();
+    87→    87→                checkLumoContainer();
+    88→    88→                
+    89→    89→                // Set up observer to detect when Lumo container appears/disappears
+    90→    90→                if (!window._lumoContainerObserver) {
+    91→    91→                    console.log('Setting up Lumo container observer...');
+    92→    92→                    let debounceTimer = null;
+    93→    93→                    
+    94→    94→                    const observer = new MutationObserver((mutations) => {
+    95→    95→                        // Debounce to prevent excessive checks
+    96→    96→                        if (debounceTimer) clearTimeout(debounceTimer);
+    97→    97→                        debounceTimer = setTimeout(() => {
+    98→    98→                            console.log('DOM mutation detected, checking container...');
+    99→    99→                            notifyPageType();
+   100→   100→                            checkLumoContainer();
+   101→   101→                        }, 100); // 100ms debounce
+   102→   102→                    });
+   103→   103→                    
+   104→   104→                    observer.observe(document.body, { 
+   105→   105→                        childList: true, 
+   106→   106→                        subtree: true 
+   107→   107→                    });
+   108→   108→                    
+   109→   109→                    window._lumoContainerObserver = observer;
+   110→   110→                    console.log('Lumo container observer started');
+   111→   111→                }
+   112→   112→                
+   113→   113→                // Override history methods to track navigation
+   114→   114→                const originalPushState = history.pushState;
+   115→   115→                const originalReplaceState = history.replaceState;
+   116→   116→                
+   117→   117→                function cleanupIntervals() {
+   118→   118→                    if (window._promotionButtonInterval) {
+   119→   119→                        clearInterval(window._promotionButtonInterval);
+   120→   120→                        window._promotionButtonInterval = null;
+   121→   121→                        console.log('Cleared promotion button interval on navigation');
+   122→   122→                    }
+   123→   123→                    if (window._upgradeLinkInterval) {
+   124→   124→                        clearInterval(window._upgradeLinkInterval);
+   125→   125→                        window._upgradeLinkInterval = null;
+   126→   126→                        console.log('Cleared upgrade link interval on navigation');
+   127→   127→                    }
+   128→   128→                }
+   129→   129→                
+   130→   130→                history.pushState = function() {
+   131→   131→                    console.log('Navigation push detected');
+   132→   132→                    cleanupIntervals();
+   133→   133→                    originalPushState.apply(this, arguments);
+   134→   134→                    if (window.Android && typeof window.Android.onNavigation === 'function') {
+   135→   135→                        window.Android.onNavigation(window.location.href, 'push');
+   136→   136→                    }
+   137→   137→                    // Check for container after a short delay
+   138→   138→                    setTimeout(checkLumoContainer, 100);
+   139→   139→                };
+   140→   140→                
+   141→   141→                history.replaceState = function() {
+   142→   142→                    console.log('Navigation replace detected');
+   143→   143→                    cleanupIntervals();
+   144→   144→                    originalReplaceState.apply(this, arguments);
+   145→   145→                    if (window.Android && typeof window.Android.onNavigation === 'function') {
+   146→   146→                        window.Android.onNavigation(window.location.href, 'replace');
+   147→   147→                    }
+   148→   148→                    // Check for container after a short delay
+   149→   149→                    setTimeout(checkLumoContainer, 100);
+   150→   150→                };
+   151→   151→                
+   152→   152→                // Listen for popstate events
+   153→   153→                window.addEventListener('popstate', function() {
+   154→   154→                    console.log('Navigation pop detected');
+   155→   155→                    cleanupIntervals();
+   156→   156→                    if (window.Android && typeof window.Android.onNavigation === 'function') {
+   157→   157→                        window.Android.onNavigation(window.location.href, 'pop');
+   158→   158→                    }
+   159→   159→                    // Check for container after a short delay
+   160→   160→                    setTimeout(checkLumoContainer, 100);
+   161→   161→                });
+   162→   162→
+   163→   163→                // Also check on URL changes
+   164→   164→                let lastUrl = window.location.href;
+   165→   165→                new MutationObserver(() => {
+   166→   166→                    const currentUrl = window.location.href;
+   167→   167→                    if (currentUrl !== lastUrl) {
+   168→   168→                        console.log('URL changed from ' + lastUrl + ' to ' + currentUrl);
+   169→   169→                        lastUrl = currentUrl;
+   170→   170→                        notifyPageType();
+   171→   171→                        // Check for container after a short delay
+   172→   172→                        setTimeout(checkLumoContainer, 100);
+   173→   173→                    }
+   174→   174→                }).observe(document, { subtree: true, childList: true });
+   175→   175→
+   176→   176→                // Periodic check for container (every 500ms for 5 seconds)
+   177→   177→                let checkCount = 0;
+   178→   178→                const maxChecks = 10;
+   179→   179→                const checkInterval = setInterval(() => {
+   180→   180→                    if (checkCount >= maxChecks) {
+   181→   181→                        console.log('Max periodic checks reached, stopping interval');
+   182→   182→                        clearInterval(checkInterval);
+   183→   183→                        return;
+   184→   184→                    }
+   185→   185→                    console.log('Running periodic container check:', checkCount + 1);
+   186→   186→                    if (checkLumoContainer()) {
+   187→   187→                        console.log('Container found in periodic check, stopping interval');
+   188→   188→                        clearInterval(checkInterval);
+   189→   189→                    }
+   190→   190→                    checkCount++;
+   191→   191→                }, 500);
+   192→   192→
+   193→   193→                // Define insertPromptAndSubmit globally
+   194→   194→                window.insertPromptAndSubmit = function(prompt) {
+   195→   195→                    console.log('Attempting to insert prompt: ' + prompt);
+   196→   196→                    
+   197→   197→                    // Start programmatic operation to prevent keyboard positioning
+   198→   198→                    if (window.startProgrammaticOperation) {
+   199→   199→                        window.startProgrammaticOperation();
+   200→   200→                    }
+   201→   201→
+   202→   202→                    function tryInsertPrompt(attempts = 0, maxAttempts = 10) {
+   203→   203→                        const editor = document.querySelector('.tiptap.ProseMirror.composer');
+   204→   204→                        if (editor) {
+   205→   205→                            console.log("Editor found");
+   206→   206→                        
+   207→   207→                            const text = prompt.trim();
+   208→   208→                        
+   209→   209→                            // Find last <p> (the paragraph we want to append to)
+   210→   210→                            let lastP = editor.querySelector('p:last-child');
+   211→   211→                        
+   212→   212→                            // If no <p> exists, create one
+   213→   213→                            if (!lastP) {
+   214→   214→                                lastP = document.createElement('p');
+   215→   215→                                editor.appendChild(lastP);
+   216→   216→                            }
+   217→   217→                        
+   218→   218→                            // Append correctly: add a space only if needed
+   219→   219→                            const needsSpace =
+   220→   220→                                lastP.textContent.length > 0 &&
+   221→   221→                                !lastP.textContent.endsWith(" ");
+   222→   222→                        
+   223→   223→                            lastP.textContent += (needsSpace ? " " : "") + text;
+   224→   224→                        
+   225→   225→                            editor.focus();
+   226→   226→                        
+   227→   227→                            // Move caret to end of paragraph
+   228→   228→                            const range = document.createRange();
+   229→   229→                            range.selectNodeContents(lastP);
+   230→   230→                            range.collapse(false);
+   231→   231→
+   232→   232→                            const sel = window.getSelection();
+   233→   233→                            sel.removeAllRanges();
+   234→   234→                            sel.addRange(range);
+   235→   235→                            
+   236→   236→                            if (window.endProgrammaticOperation) {
+   237→   237→                                window.endProgrammaticOperation();
+   238→   238→                            }
+   239→   239→                            
+   240→   240→                            return true;
+   241→   241→                        } else if (attempts < maxAttempts) {
+   242→   242→                            console.log('Editor not found, retrying... (attempt ' + (attempts + 1) + ' of ' + maxAttempts + ')');
+   243→   243→                            setTimeout(() => tryInsertPrompt(attempts + 1, maxAttempts), 500);
+   244→   244→                            return false;
+   245→   245→                        } else {
+   246→   246→                            console.log('Failed to find editor after ' + maxAttempts + ' attempts');
+   247→   247→                            
+   248→   248→                            // End programmatic operation even on failure
+   249→   249→                            if (window.endProgrammaticOperation) {
+   250→   250→                                window.endProgrammaticOperation();
+   251→   251→                            }
+   252→   252→                            return false;
+   253→   253→                        }
+   254→   254→                    }
+   255→   255→                    return tryInsertPrompt();
+   256→   256→                };
+   257→   257→                console.log('insertPromptAndSubmit function defined.');
+   258→   258→            } else {
+   259→   259→                // Not lumo domain, just notify page type
+   260→   260→                notifyPageType();
+   261→   261→            }
+   262→   262→        })();
+   263→   263→    """.trimIndent()
+   264→   264→
+   265→   265→    Timber.tag(TAG).i("Injecting essential JavaScript")
+   266→   266→    webView.evaluateJavascript(js, null)
+   267→   267→}
+   268→   268→
+   269→   269→/**
+   270→   270→ * Injects JavaScript to handle promotion buttons for payment
+   271→   271→ */
+   272→   272→@Suppress("LongMethod")
+   273→   273→fun injectPromotionButtonHandlers(webView: WebView) {
+   274→   274→    val js = """
+   275→   275→        (function() {
+   276→   276→            try {
+   277→   277→                console.log('Setting up promotion button click handlers');
+   278→   278→                
+   279→   279→                // Function to attach click handlers to promotion buttons
+   280→   280→                function attachPromotionClickHandlers() {
+   281→   281→                    // Select all buttons with the specified classes
+   282→   282→                    const promotionButtons = document.querySelectorAll('.lumo-upgrade-trigger, .lumo-addon-button, .upsell-addon-button, .manage-plan');
+   283→   283→                    
+   284→   284→                    if (promotionButtons.length > 0) {
+   285→   285→                        
+   286→   286→                        // Add click handlers to each button
+   287→   287→                        promotionButtons.forEach((button, index) => {
+   288→   288→                            // Ensure we don't add multiple handlers to the same button
+   289→   289→                            if (!button.hasAttribute('data-payment-handler')) {
+   290→   290→                                button.addEventListener('click', function(e) {
+   291→   291→                                    console.log(`Promotion button clicked`);
+   292→   292→                                    e.preventDefault();
+   293→   293→                                    e.stopPropagation();
+   294→   294→                                    
+   295→   295→                                    // Use robust AndroidInterface.showPayment() with retry logic
+   296→   296→                                    if (window.AndroidInterface && window.AndroidInterface.showPayment) {
+   297→   297→                                        window.AndroidInterface.showPayment();
+   298→   298→                                    } else if (window.Android && window.Android.showPayment) {
+   299→   299→                                        // Fallback to direct call if polyfill not loaded
+   300→   300→                                        window.Android.showPayment();
+   301→   301→                                    } else {
+   302→   302→                                        console.error('Android payment interface not available');
+   303→   303→                                        alert('Payment interface not available. Please refresh the page and try again.');
+   304→   304→                                    }
+   305→   305→                                    return false;
+   306→   306→                                });
+   307→   307→                                // Mark the button as having a handler
+   308→   308→                                button.setAttribute('data-payment-handler', 'true');
+   309→   309→                                console.log(`Added payment handler to promotion button`);
+   310→   310→                            }
+   311→   311→                        });
+   312→   312→                    } else {
+   313→   313→                        console.log('No promotion buttons found yet');
+   314→   314→                    }
+   315→   315→                }
+   316→   316→                
+   317→   317→                // Run immediately for any buttons that already exist
+   318→   318→                attachPromotionClickHandlers();
+   319→   319→                
+   320→   320→                // Set up a MutationObserver to watch for dynamically added buttons
+   321→   321→                if (!window._promotionButtonObserver) {
+   322→   322→                    const observer = new MutationObserver((mutations) => {
+   323→   323→                        let shouldCheckForButtons = false;
+   324→   324→                        
+   325→   325→                        for (const mutation of mutations) {
+   326→   326→                            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+   327→   327→                                shouldCheckForButtons = true;
+   328→   328→                                break;
+   329→   329→                            }
+   330→   330→                        }
+   331→   331→                        
+   332→   332→                        if (shouldCheckForButtons) {
+   333→   333→                            console.log('DOM changed, checking for new promotion buttons');
+   334→   334→                            attachPromotionClickHandlers();
+   335→   335→                        }
+   336→   336→                    });
+   337→   337→                    
+   338→   338→                    // Start observing the document body for DOM changes
+   339→   339→                    observer.observe(document.body, { 
+   340→   340→                        childList: true, 
+   341→   341→                        subtree: true 
+   342→   342→                    });
+   343→   343→                    
+   344→   344→                    window._promotionButtonObserver = observer;
+   345→   345→                    console.log('Promotion button observer started');
+   346→   346→                }
+   347→   347→            } catch (e) {
+   348→   348→                console.error('Error setting up promotion button handlers:', e);
+   349→   349→                console.error('Error stack:', e.stack);
+   350→   350→            }
+   351→   351→        })();
+   352→   352→    """.trimIndent()
+   353→   353→
+   354→   354→    Timber.tag(TAG).i("Injecting promotion button handlers JavaScript")
+   355→   355→    webView.evaluateJavascript(js) { result ->
+   356→   356→        Timber.tag(TAG).i("Promotion button handler JS evaluation result: $result")
+   357→   357→    }
+   358→   358→}
+   359→   359→
+   360→   360→@Suppress("LongMethod")
+   361→   361→fun injectSignupPlanParamFix(webView: WebView) {
+   362→   362→    val js = """
+   363→   363→        (function() {
+   364→   364→            
+   365→   365→            function updateSignupLinks() {
+   366→   366→            
+   367→   367→                var allLinks = document.querySelectorAll('a[href*="signup"]');
+   368→   368→                
+   369→   369→                var modifiedCount = 0;
+   370→   370→                
+   371→   371→                allLinks.forEach(function(link) {
+   372→   372→                    var href = link.getAttribute('href');
+   373→   373→                    var linkText = link.textContent || link.innerText || '[no text]';
+   374→   374→                    
+   375→   375→                    if (href && href.includes('signup') && !href.includes('plan=')) {
+   376→   376→                        var newHref;
+   377→   377→                        if (href.includes('?')) {
+   378→   378→                            newHref = href + '&plan=free';
+   379→   379→                        } else {
+   380→   380→                            newHref = href + '?plan=free';
+   381→   381→                        }
+   382→   382→                        
+   383→   383→                        link.setAttribute('href', newHref);
+   384→   384→                        modifiedCount++;
+   385→   385→                        
+   386→   386→                        // This seems overly convoluted since it is
+   387→   387→                        // I was having trouble getting the search param to stick
+   388→   388→                        if (!link.hasAttribute('data-plan-click-handler')) {
+   389→   389→                            link.addEventListener('click', function(e) {        
+   390→   390→                                // ALWAYS prevent default and force our own navigation for signup links
+   391→   391→                                e.preventDefault();
+   392→   392→                                e.stopPropagation();
+   393→   393→                                
+   394→   394→                                var finalHref = this.getAttribute('href') || this.href;
+   395→   395→                                
+   396→   396→                                if (finalHref && finalHref.includes('signup') && !finalHref.includes('plan=')) {
+   397→   397→                                    finalHref = finalHref.includes('?') ? finalHref + '&plan=free' : finalHref + '?plan=free';
+   398→   398→                                }
+   399→   399→                                
+   400→   400→                                window.location.href = finalHref;
+   401→   401→                                return false;
+   402→   402→                            }, true); // Use capture phase to run before other handlers
+   403→   403→                            
+   404→   404→                            link.setAttribute('data-plan-click-handler', 'true');
+   405→   405→                        }
+   406→   406→                    }
+   407→   407→                });
+   408→   408→                
+   409→   409→                return modifiedCount;
+   410→   410→            }
+   411→   411→            
+   412→   412→            // Run immediately
+   413→   413→            var initialCount = updateSignupLinks();
+   414→   414→            
+   415→   415→            var observer = new MutationObserver(function(mutations) {
+   416→   416→                updateSignupLinks();
+   417→   417→            });
+   418→   418→            
+   419→   419→            observer.observe(document.body, { childList: true, subtree: true });
+   420→   420→        })();
+   421→   421→    """.trimIndent()
+   422→   422→
+   423→   423→    Timber.tag(TAG).i("Injecting signup URL modifier JavaScript")
+   424→   424→    webView.evaluateJavascript(js) { result ->
+   425→   425→        Timber.tag(TAG).i("Signup URL modifier JS evaluation result: $result")
+   426→   426→    }
+   427→   427→}
+   428→   428→
+   429→   429→/**
+   430→   430→ * Injects JavaScript to check for Lumo container visibility
+   431→   431→ */
+   432→   432→fun injectLumoContainerCheck(webView: WebView) {
+   433→   433→    val js = """
+   434→   434→        (function() {
+   435→   435→            function checkLumoContainer() {
+   436→   436→                const container = document.querySelector('.lumo-input-container');
+   437→   437→                if (container) {
+   438→   438→                    // Use a timeout to ensure Android interface is fully available
+   439→   439→                    setTimeout(() => {
+   440→   440→                        if (window.Android && typeof window.Android.onLumoContainerVisible === 'function') {
+   441→   441→                            try {
+   442→   442→                                window.Android.onLumoContainerVisible();
+   443→   443→                            } catch (e) {
+   444→   444→                                console.error('Error calling Android.onLumoContainerVisible:', e);
+   445→   445→                            }
+   446→   446→                        } else {
+   447→   447→                            console.error('Android interface or onLumoContainerVisible method not found');
+   448→   448→                        }
+   449→   449→                    }, 150);
+   450→   450→                    return true;
+   451→   451→                }
+   452→   452→                return false;
+   453→   453→            }
+   454→   454→            
+   455→   455→            // Check immediately
+   456→   456→            if (!checkLumoContainer()) {
+   457→   457→                const observer = new MutationObserver((mutations) => {
+   458→   458→                    if (checkLumoContainer()) {
+   459→   459→                        observer.disconnect();
+   460→   460→                    }
+   461→   461→                });
+   462→   462→                
+   463→   463→                observer.observe(document.body, {
+   464→   464→                    childList: true,
+   465→   465→                    subtree: true
+   466→   466→                });
+   467→   467→                
+   468→   468→                // Safety timeout to prevent infinite loading
+   469→   469→                setTimeout(() => {
+   470→   470→                    observer.disconnect();
+   471→   471→                    if (!checkLumoContainer()) {
+   472→   472→                        if (window.Android && typeof window.Android.onLumoContainerVisible === 'function') {
+   473→   473→                            try {
+   474→   474→                                window.Android.onLumoContainerVisible();
+   475→   475→                            } catch (e) {
+   476→   476→                                console.error('Error calling Android.onLumoContainerVisible in safety timeout:', e);
+   477→   477→                            }
+   478→   478→                        }
+   479→   479→                    }
+   480→   480→                }, 3000);
+   481→   481→            }
+   482→   482→        })();
+   483→   483→    """.trimIndent()
+   484→   484→
+   485→   485→    Timber.tag(TAG).i("Injecting Lumo container check JavaScript")
+   486→   486→    webView.evaluateJavascript(js) { result ->
+   487→   487→        Timber.tag(TAG).i("Container check JS evaluation result: $result")
+   488→   488→    }
+   489→   489→}
+   490→   490→
+   491→   491→/**
+   492→   492→ * Injects JavaScript to handle links containing 'lumo/upgrade' in the href
+   493→   493→ */
+   494→   494→@Suppress("LongMethod")
+   495→   495→fun injectUpgradeLinkHandlers(webView: WebView) {
+   496→   496→
+   497→   497→    val js = """
+   498→   498→        (function() {
+   499→   499→            try {
+   500→   500→                // Function to attach click handlers to upgrade links
+   501→   501→                function attachUpgradeLinkHandlers() {
+   502→   502→                    // Select all links that contain 'lumo/upgrade' in the href
+   503→   503→                    const upgradeLinks = document.querySelectorAll('a[href*="lumo/upgrade"]');
+   504→   504→                    
+   505→   505→                    if (upgradeLinks.length > 0) {
+   506→   506→                        console.log(`Found upgrade links`);
+   507→   507→                        
+   508→   508→                        // Add click handlers to each link
+   509→   509→                        upgradeLinks.forEach((link, index) => {
+   510→   510→                            // Ensure we don't add multiple handlers to the same link
+   511→   511→                            if (!link.hasAttribute('data-payment-handler')) {
+   512→   512→                                link.addEventListener('click', function(e) {
+   513→   513→                                    e.preventDefault();
+   514→   514→                                    e.stopPropagation();
+   515→   515→                                    
+   516→   516→                                    // Use robust AndroidInterface.showPayment() with retry logic
+   517→   517→                                    if (window.AndroidInterface && window.AndroidInterface.showPayment) {
+   518→   518→                                        window.AndroidInterface.showPayment();
+   519→   519→                                    } else if (window.Android && window.Android.showPayment) {
+   520→   520→                                        // Fallback to direct call if polyfill not loaded
+   521→   521→                                        window.Android.showPayment();
+   522→   522→                                    } else {
+   523→   523→                                        console.error('Android payment interface not available');
+   524→   524→                                        alert('Payment interface not available. Please refresh the page and try again.');
+   525→   525→                                    }
+   526→   526→                                    return false;
+   527→   527→                                });
+   528→   528→                                link.setAttribute('data-payment-handler', 'true');
+   529→   529→                            }
+   530→   530→                        });
+   531→   531→                    } 
+   532→   532→                }
+   533→   533→                
+   534→   534→                // Run immediately for any links that already exist
+   535→   535→                attachUpgradeLinkHandlers();
+   536→   536→                
+   537→   537→                // Set up a MutationObserver to watch for dynamically added links
+   538→   538→                if (!window._upgradeLinkObserver) {
+   539→   539→                    const observer = new MutationObserver((mutations) => {
+   540→   540→                        let shouldCheckForLinks = false;
+   541→   541→                        
+   542→   542→                        for (const mutation of mutations) {
+   543→   543→                            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+   544→   544→                                shouldCheckForLinks = true;
+   545→   545→                                break;
+   546→   546→                            }
+   547→   547→                        }
+   548→   548→                        
+   549→   549→                        if (shouldCheckForLinks) {
+   550→   550→                            attachUpgradeLinkHandlers();
+   551→   551→                        }
+   552→   552→                    });
+   553→   553→                    
+   554→   554→                    // Start observing the document body for DOM changes
+   555→   555→                    observer.observe(document.body, { 
+   556→   556→                        childList: true, 
+   557→   557→                        subtree: true 
+   558→   558→                    });
+   559→   559→                    
+   560→   560→                    window._upgradeLinkObserver = observer;
+   561→   561→                }
+   562→   562→            } catch (e) {
+   563→   563→                console.error('Error setting up upgrade link handlers:', e);
+   564→   564→                console.error('Error stack:', e.stack);
+   565→   565→            }
+   566→   566→        })();
+   567→   567→    """.trimIndent()
+   568→   568→    Timber.tag(TAG).i("Injecting upgrade link handlers JavaScript")
+   569→   569→    webView.evaluateJavascript(js) { result ->
+   570→   570→        Timber.tag(TAG).i("Upgrade link handler JS evaluation result: $result")
+   571→   571→    }
+   572→   572→}
+   573→   573→
+   574→   574→/**
+   575→   575→ * Injects JavaScript to handle keyboard visibility and adjust composer positioning
+   576→   576→ */
+   577→   577→@Suppress("LongMethod")
+   578→   578→fun injectKeyboardHandling(webView: WebView) {
+   579→   579→    Timber.tag(TAG).i("🎯 injectKeyboardHandling() called - about to inject JavaScript")
+   580→   580→    val js = """
+   581→   581→        (function() {
+   582→   582→            console.log('🚀 Lumo keyboard handler initializing...');
+   583→   583→            
+   584→   584→            // Define function immediately to prevent race conditions
+   585→   585→            window.onNativeKeyboardChange = function(isVisible, dynamicKeyboardHeight) {
+   586→   586→                console.log('🔥 JavaScript received keyboard event (early):', {isVisible, dynamicKeyboardHeight});
+   587→   587→                // Store the call for when the full handler is ready
+   588→   588→                window._pendingKeyboardCall = {isVisible, dynamicKeyboardHeight, timestamp: Date.now()};
+   589→   589→            };
+   590→   590→            
+   591→   591→            let isKeyboardVisible = false;
+   592→   592→            let composerElement = null;
+   593→   593→            let keyboardOffset = 0; // Will be set by Android detection
+   594→   594→            let isProgrammaticOperation = false; // Flag to prevent false triggers
+   595→   595→            
+   596→   596→            // Helper function to check if element is a valid composer input
+   597→   597→            function isComposerInput(element) {
+   598→   598→                if (!element) {
+   599→   599→                    return false;
+   600→   600→                }
+   601→   601→                
+   602→   602→                // Explicitly exclude buttons and navigation elements
+   603→   603→                if (element.tagName === 'BUTTON' || 
+   604→   604→                    element.classList.contains('button') || 
+   605→   605→                    element.classList.contains('hamburger') ||
+   606→   606→                    element.closest('button') ||
+   607→   607→                    element.closest('.button')) {
+   608→   608→                    return false;
+   609→   609→                }
+   610→   610→                
+   611→   611→                // Only trigger for the actual composer input - be very specific
+   612→   612→                const isComposerTextInput = (
+   613→   613→                    (element.contentEditable === 'true' && element.classList.contains('ProseMirror') && element.classList.contains('composer')) ||
+   614→   614→                    (element.contentEditable === 'true' && element.classList.contains('composer')) ||
+   615→   615→                    (element.tagName === 'TEXTAREA' && element.closest('.lumo-input'))
+   616→   616→                );
+   617→   617→                
+   618→   618→                // Must be within the lumo-input area specifically, not just the container
+   619→   619→                const result = isComposerTextInput && element.closest('.lumo-input') !== null;
+   620→   620→                return result;
+   621→   621→            }
+   622→   622→            
+   623→   623→            // Function to find and cache the composer element
+   624→   624→            function findComposerElement() {
+   625→   625→                if (!composerElement) {
+   626→   626→                    composerElement = document.querySelector('.lumo-input-container');
+   627→   627→                }
+   628→   628→                return composerElement;
+   629→   629→            }
+   630→   630→            
+   631→   631→            // Initialize everything
+   632→   632→            function initKeyboardHandling() {
+   633→   633→                
+   634→   634→                // CSS for essential keyboard positioning styles
+   635→   635→                const style = document.createElement('style');
+   636→   636→                style.id = 'keyboard-forced-styles';
+   637→   637→                style.textContent = `
+   638→   638→                    .keyboard-forced-visible {
+   639→   639→                        margin: 0 !important;
+   640→   640→                        box-sizing: border-box !important;
+   641→   641→                        max-width: 100vw !important;
+   642→   642→                    }
+   643→   643→                `;
+   644→   644→                document.head.appendChild(style);
+   645→   645→                
+   646→   646→                // Replace temporary function with full handler
+   647→   647→                window.onNativeKeyboardChange = function(isVisible, dynamicKeyboardHeight) {
+   648→   648→                    // Skip if this is a programmatic operation (voice entry, etc.)
+   649→   649→                    if (isProgrammaticOperation) {
+   650→   650→                        console.log('📱 Skipping keyboard positioning during programmatic operation');
+   651→   651→                        return;
+   652→   652→                    }
+   653→   653→                    
+   654→   654→                    // Use precise Android keyboard height measurement
+   655→   655→                    if (dynamicKeyboardHeight && dynamicKeyboardHeight > 0) {
+   656→   656→                        keyboardOffset = dynamicKeyboardHeight;
+   657→   657→                    } else {
+   658→   658→                        console.log('⚠️ No valid keyboard height received:', dynamicKeyboardHeight);
+   659→   659→                    }
+   660→   660→                    
+   661→   661→                    // Continue with existing keyboard logic...
+   662→   662→                    handleKeyboardChange(isVisible, dynamicKeyboardHeight);
+   663→   663→                };
+   664→   664→                
+   665→   665→                // Check for any pending keyboard calls that arrived early
+   666→   666→                if (window._pendingKeyboardCall) {
+   667→   667→                    console.log('📞 Processing pending keyboard call:', window._pendingKeyboardCall);
+   668→   668→                    const pending = window._pendingKeyboardCall;
+   669→   669→                    delete window._pendingKeyboardCall;
+   670→   670→                    window.onNativeKeyboardChange(pending.isVisible, pending.dynamicKeyboardHeight);
+   671→   671→                }
+   672→   672→                
+   673→   673→                // Extract keyboard logic into separate function
+   674→   674→                function handleKeyboardChange(isVisible, dynamicKeyboardHeight) {
+   675→   675→                    
+   676→   676→                    // Handle welcome section visibility
+   677→   677→                    function handleWelcomeSectionVisibility(keyboardVisible) {
+   678→   678→                        const welcomeSection = document.querySelector('.lumo-welcome-section');
+   679→   679→                        if (welcomeSection) {
+   680→   680→                            if (keyboardVisible) {
+   681→   681→                                console.log('📱 Hiding welcome section for keyboard');
+   682→   682→                                welcomeSection.style.transition = 'opacity 0.2s ease-out';
+   683→   683→                                welcomeSection.style.opacity = '0';
+   684→   684→                                // Optional: hide completely after fade
+   685→   685→                                setTimeout(() => {
+   686→   686→                                    if (welcomeSection.style.opacity === '0') {
+   687→   687→                                        welcomeSection.style.display = 'none';
+   688→   688→                                    }
+   689→   689→                                }, 200);
+   690→   690→                            } else {
+   691→   691→                                console.log('📱 Showing welcome section - keyboard hidden');
+   692→   692→                                welcomeSection.style.display = '';
+   693→   693→                                welcomeSection.style.transition = 'opacity 0.2s ease-in';
+   694→   694→                                welcomeSection.style.opacity = '1';
+   695→   695→                            }
+   696→   696→                        }
+   697→   697→                    }
+   698→   698→                    
+   699→   699→                    if (isVisible) {
+   700→   700→                        console.log('📱 Keyboard is visible, checking if activeElement is composer input...');
+   701→   701→                        // Hide welcome section immediately when keyboard appears
+   702→   702→                        handleWelcomeSectionVisibility(true);
+   703→   703→                        
+   704→   704→                        if (isComposerInput(document.activeElement)) {
+   705→   705→                            
+   706→   706→                            // Add a delay to ensure focus is intentional and sustained
+   707→   707→                            setTimeout(() => {
+   708→   708→                                if (isComposerInput(document.activeElement)) {
+   709→   709→                                    console.log('📱 Focus sustained - positioning composer');
+   710→   710→                                    isKeyboardVisible = true;
+   711→   711→                                } else {
+   712→   712→                                    console.log('📱 Focus lost quickly - ignoring brief focus event');
+   713→   713→                                }
+   714→   714→                            }, 150); // 150ms delay to filter out brief touches
+   715→   715→                        } else {
+   716→   716→                            console.log('📱 ActiveElement is NOT composer input - ignoring keyboard event');
+   717→   717→                        }
+   718→   718→                    } else {
+   719→   719→                        console.log('📱 Keyboard is hidden - resetting composer position');
+   720→   720→                        isKeyboardVisible = false;
+   721→   721→                        // Show welcome section when keyboard is hidden
+   722→   722→                        handleWelcomeSectionVisibility(false);
+   723→   723→                    }
+   724→   724→                } // End of handleKeyboardChange function
+   725→   725→                
+   726→   726→                // Global functions to control programmatic operations
+   727→   727→                window.startProgrammaticOperation = function() {
+   728→   728→                    isProgrammaticOperation = true;
+   729→   729→                };
+   730→   730→                
+   731→   731→                window.endProgrammaticOperation = function() {
+   732→   732→                    isProgrammaticOperation = false;
+   733→   733→                    // Force reset composer position in case it got stuck
+   734→   734→                    if (isKeyboardVisible) {
+   735→   735→                        isKeyboardVisible = false;
+   736→   736→                    }
+   737→   737→                };
+   738→   738→                
+   739→   739→                // Debug function to help diagnose keyboard positioning issues
+   740→   740→                window.debugKeyboardPositioning = function() {
+   741→   741→                    const composer = findComposerElement();
+   742→   742→                    const debugInfo = {
+   743→   743→                        timestamp: new Date().toISOString(),
+   744→   744→                        windowHeight: window.innerHeight,
+   745→   745→                        windowWidth: window.innerWidth,
+   746→   746→                        keyboardOffset: keyboardOffset,
+   747→   747→                        isKeyboardVisible: isKeyboardVisible,
+   748→   748→                        isProgrammaticOperation: isProgrammaticOperation,
+   749→   749→                        composerFound: !!composer,
+   750→   750→                        activeElement: document.activeElement ? {
+   751→   751→                            tagName: document.activeElement.tagName,
+   752→   752→                            className: document.activeElement.className,
+   753→   753→                            id: document.activeElement.id
+   754→   754→                        } : null
+   755→   755→                    };
+   756→   756→                    
+   757→   757→                    if (composer) {
+   758→   758→                        const computedStyle = window.getComputedStyle(composer);
+   759→   759→                        debugInfo.composerStyle = {
+   760→   760→                            position: computedStyle.position,
+   761→   761→                            bottom: computedStyle.bottom,
+   762→   762→                            left: computedStyle.left,
+   763→   763→                            right: computedStyle.right,
+   764→   764→                            width: computedStyle.width,
+   765→   765→                            zIndex: computedStyle.zIndex,
+   766→   766→                            transform: computedStyle.transform,
+   767→   767→                            visibility: computedStyle.visibility,
+   768→   768→                            display: computedStyle.display
+   769→   769→                        };
+   770→   770→                        
+   771→   771→                        const rect = composer.getBoundingClientRect();
+   772→   772→                        debugInfo.composerRect = {
+   773→   773→                            top: rect.top,
+   774→   774→                            bottom: rect.bottom,
+   775→   775→                            left: rect.left,
+   776→   776→                            right: rect.right,
+   777→   777→                            width: rect.width,
+   778→   778→                            height: rect.height
+   779→   779→                        };
+   780→   780→                    }
+   781→   781→                    
+   782→   782→                    console.log('🔍 Keyboard Positioning Debug Info:', debugInfo);
+   783→   783→                    return debugInfo;
+   784→   784→                };
+   785→   785→                
+   786→   786→                // Focus handlers as backup method
+   787→   787→                function setupComposerListeners() {
+   788→   788→                    const composer = findComposerElement();
+   789→   789→                    if (!composer) return false;
+   790→   790→                    
+   791→   791→                    // Only target the actual composer inputs, not all inputs in the container
+   792→   792→                    const inputs = composer.querySelectorAll('.lumo-input .composer, .lumo-input textarea, .lumo-input .ProseMirror.composer');
+   793→   793→                    
+   794→   794→                    inputs.forEach(input => {
+   795→   795→                        if (input.hasAttribute('data-keyboard-listener')) return;
+   796→   796→                        
+   797→   797→                        input.addEventListener('focusin', function() {
+   798→   798→                            if (isProgrammaticOperation) {
+   799→   799→                                console.log('📱 Skipping focus handler during programmatic operation');
+   800→   800→                                return;
+   801→   801→                            }
+   802→   802→                            if (!isKeyboardVisible) {
+   803→   803→                                setTimeout(() => {
+   804→   804→                                    if (isComposerInput(document.activeElement) && !isKeyboardVisible) {
+   805→   805→                                        isKeyboardVisible = true;
+   806→   806→                                    }
+   807→   807→                                }, 150);
+   808→   808→                            }
+   809→   809→                        });
+   810→   810→                        
+   811→   811→                        input.addEventListener('focusout', function() {
+   812→   812→                            if (isProgrammaticOperation) {
+   813→   813→                                return;
+   814→   814→                            }
+   815→   815→                            
+   816→   816→                            setTimeout(() => {
+   817→   817→                                const stillInComposer = isComposerInput(document.activeElement);
+   818→   818→                                if (!stillInComposer && isKeyboardVisible) {
+   819→   819→                                    isKeyboardVisible = false;
+   820→   820→                                }
+   821→   821→                            }, 50);
+   822→   822→                        });
+   823→   823→                        
+   824→   824→                        input.setAttribute('data-keyboard-listener', 'true');
+   825→   825→                    });
+   826→   826→                    
+   827→   827→                    return inputs.length > 0;
+   828→   828→                }
+   829→   829→                
+   830→   830→                // Set up listeners initially
+   831→   831→                setupComposerListeners();
+   832→   832→                
+   833→   833→                // Observer for dynamic content
+   834→   834→                const observer = new MutationObserver(function(mutations) {
+   835→   835→                    let foundNewComposer = false;
+   836→   836→                    let debounceTimer = null;
+   837→   837→                    
+   838→   838→                    // Clear existing timer
+   839→   839→                    if (debounceTimer) clearTimeout(debounceTimer);
+   840→   840→                    
+   841→   841→                    // Debounce the check
+   842→   842→                    debounceTimer = setTimeout(() => {
+   843→   843→                        mutations.forEach(function(mutation) {
+   844→   844→                            if (mutation.type === 'childList') {
+   845→   845→                                mutation.addedNodes.forEach(function(node) {
+   846→   846→                                    if (node.nodeType === 1 && node.querySelector && node.querySelector('.lumo-input-container')) {
+   847→   847→                                        composerElement = null; // Reset cache
+   848→   848→                                        foundNewComposer = true;
+   849→   849→                                    }
+   850→   850→                                });
+   851→   851→                            }
+   852→   852→                        });
+   853→   853→                        
+   854→   854→                        if (foundNewComposer) {
+   855→   855→                            setupComposerListeners();
+   856→   856→                        }
+   857→   857→                    }, 150); // 150ms debounce for composer changes
+   858→   858→                });
+   859→   859→                
+   860→   860→                // Ensure document.body exists before observing
+   861→   861→                if (document.body) {
+   862→   862→                    observer.observe(document.body, { childList: true, subtree: true });
+   863→   863→                } else {
+   864→   864→                    console.log('⚠️ document.body not ready, deferring MutationObserver setup');
+   865→   865→                    document.addEventListener('DOMContentLoaded', function() {
+   866→   866→                        if (document.body) {
+   867→   867→                            observer.observe(document.body, { childList: true, subtree: true });
+   868→   868→                        }
+   869→   869→                    });
+   870→   870→                }
+   871→   871→            }
+   872→   872→            
+   873→   873→            // Initialize when DOM is ready
+   874→   874→            if (document.readyState === 'loading') {
+   875→   875→                document.addEventListener('DOMContentLoaded', initKeyboardHandling);
+   876→   876→            } else {
+   877→   877→                initKeyboardHandling();
+   878→   878→            }
+   879→   879→            
+   880→   880→            // Ensure function is immediately available for Android calls
+   881→   881→            console.log('✅ Lumo keyboard handler ready. Function available:', typeof window.onNativeKeyboardChange);
+   882→   882→     
+   883→   883→        })();
+   884→   884→    """.trimIndent()
+   885→   885→
+   886→   886→    Timber.tag(TAG).i("💉 About to inject keyboard JavaScript of length: ${js.length}")
+   887→   887→    webView.evaluateJavascript(js) { result ->
+   888→   888→        Timber.tag(TAG).i("✅ Keyboard JavaScript injection completed. Result: $result")
+   889→   889→    }
+   890→   890→}
+   891→   891→
+   892→   892→/**
+   893→   893→ * Injects JavaScript to modify account pages by removing unwanted sections
+   894→   894→ */
+   895→   895→@Suppress("LongMethod")
+   896→   896→fun injectAccountPageModifier(webView: WebView) {
+   897→   897→    val js = """
+   898→   898→        (function() {
+   899→   899→            function removeIfExists(selector, description) {
+   900→   900→                const elements = document.querySelectorAll(selector);
+   901→   901→                if (elements.length > 0) {
+   902→   902→                    elements.forEach(el => el.remove());
+   903→   903→                    console.log(`Removed ${'$'}{elements.length} ${'$'}{description}`);
+   904→   904→                    return true;
+   905→   905→                }
+   906→   906→                return false;
+   907→   907→            }
+   908→   908→
+   909→   909→            function removeSidebarUpgradeItem() {
+   910→   910→                const links = document.querySelectorAll('a.navigation-link');
+   911→   911→                let removed = false;
+   912→   912→
+   913→   913→                links.forEach(link => {
+   914→   914→                    const href = link.getAttribute('href')?.toLowerCase() || '';
+   915→   915→                    const text = link.textContent?.toLowerCase() || '';
+   916→   916→                    if (href.includes('upgrade') || text.includes('upgrade')) {
+   917→   917→                        const li = link.closest('li.navigation-item');
+   918→   918→                        if (li) {
+   919→   919→                            li.remove();
+   920→   920→                            removed = true;
+   921→   921→                            console.log('Removed sidebar item containing "upgrade"');
+   922→   922→                        }
+   923→   923→                    }
+   924→   924→                });
+   925→   925→
+   926→   926→                return removed;
+   927→   927→            }
+   928→   928→
+   929→   929→            function modifyAccountPage() {
+   930→   930→                // Remove "Your plan" section
+   931→   931→                removeIfExists('#your-plan', '#your-plan section');
+   932→   932→
+   933→   933→                removeIfExists('.button-promotion--bf-2025-free', 'Black Friday promo button');
+   934→   934→                removeIfExists('.button-promotion.button-promotion--icon-gradient', 'Default upgrade button');
+   935→   935→
+   936→   936→                // Remove sidebar item containing "upgrade"
+   937→   937→                removeSidebarUpgradeItem();
+   938→   938→            }
+   939→   939→
+   940→   940→            // Run immediately
+   941→   941→            modifyAccountPage();
+   942→   942→
+   943→   943→            // Observe DOM for dynamic sidebar expansion or async loads
+   944→   944→            const observer = new MutationObserver((mutationsList) => {
+   945→   945→                for (const mutation of mutationsList) {
+   946→   946→                    if (mutation.addedNodes.length > 0 || mutation.removedNodes.length > 0) {
+   947→   947→                        modifyAccountPage();
+   948→   948→                        break;
+   949→   949→                    }
+   950→   950→                }
+   951→   951→            });
+   952→   952→            observer.observe(document.body, { childList: true, subtree: true });
+   953→   953→
+   954→   954→            console.log('Account page modifier observer registered');
+   955→   955→        })();
+   956→   956→    """.trimIndent()
+   957→   957→
+   958→   958→    Timber.tag(TAG).i("Injecting account page modifier JavaScript")
+   959→   959→    webView.evaluateJavascript(js, null)
+   960→   960→}
+   961→   961→
+   962→   962→/**
+   963→   963→ * Injects Android interface availability checking and retry logic to make interface calls robust
+   964→   964→ */
+   965→   965→@Suppress("LongMethod")
+   966→   966→fun injectAndroidInterfacePolyfill(webView: WebView) {
+   967→   967→    val js = """
+   968→   968→        (function() {
+   969→   969→            // Create a robust wrapper for Android interface calls
+   970→   970→            window.AndroidInterface = {
+   971→   971→                // Maximum retry attempts
+   972→   972→                maxRetries: 10,
+   973→   973→                
+   974→   974→                // Retry delay in milliseconds
+   975→   975→                retryDelay: 200,
+   976→   976→                
+   977→   977→                // Check if Android interface is available
+   978→   978→                isAvailable: function() {
+   979→   979→                    return typeof window.Android !== 'undefined' && 
+   980→   980→                           typeof window.Android.showPayment === 'function';
+   981→   981→                },
+   982→   982→                
+   983→   983→                // Call showPayment with retry logic
+   984→   984→                showPayment: function() {
+   985→   985→                    if (this.isAvailable()) {
+   986→   986→                        console.log('Android.showPayment available, calling immediately');
+   987→   987→                        try {
+   988→   988→                            window.Android.showPayment();
+   989→   989→                            return true;
+   990→   990→                        } catch (e) {
+   991→   991→                            console.error('Error calling Android.showPayment:', e);
+   992→   992→                            return false;
+   993→   993→                        }
+   994→   994→                    } else {
+   995→   995→                        console.log('Android.showPayment not available, attempting retry logic');
+   996→   996→                        this.retryShowPayment(0);
+   997→   997→                        return false;
+   998→   998→                    }
+   999→   999→                },
+  1000→  1000→                
+  1001→  1001→                // Retry showPayment call with exponential backoff
+  1002→  1002→                retryShowPayment: function(attempt) {
+  1003→  1003→                    const self = this;
+  1004→  1004→                    
+  1005→  1005→                    if (attempt >= this.maxRetries) {
+  1006→  1006→                        console.error('AndroidInterface: Max retries reached for showPayment');
+  1007→  1007→                        alert('Payment interface not available. Please try again.');
+  1008→  1008→                        return;
+  1009→  1009→                    }
+  1010→  1010→                    
+  1011→  1011→                    setTimeout(function() {
+  1012→  1012→                        if (self.isAvailable()) {
+  1013→  1013→                            console.log('Android.showPayment now available after ' + attempt + ' retries');
+  1014→  1014→                            try {
+  1015→  1015→                                window.Android.showPayment();
+  1016→  1016→                            } catch (e) {
+  1017→  1017→                                console.error('Error calling Android.showPayment after retry:', e);
+  1018→  1018→                            }
+  1019→  1019→                        } else {
+  1020→  1020→                            console.log('Retry attempt ' + (attempt + 1) + ' - Android.showPayment still not available');
+  1021→  1021→                            self.retryShowPayment(attempt + 1);
+  1022→  1022→                        }
+  1023→  1023→                    }, this.retryDelay * Math.pow(1.5, attempt)); // Exponential backoff
+  1024→  1024→                },
+  1025→  1025→                
+  1026→  1026→                // Safe wrapper for other Android interface methods
+  1027→  1027→                callMethod: function(methodName, ...args) {
+  1028→  1028→                    if (typeof window.Android !== 'undefined' && 
+  1029→  1029→                        typeof window.Android[methodName] === 'function') {
+  1030→  1030→                        try {
+  1031→  1031→                            return window.Android[methodName](...args);
+  1032→  1032→                        } catch (e) {
+  1033→  1033→                            return false;
+  1034→  1034→                        }
+  1035→  1035→                    } else {
+  1036→  1036→                        console.warn('Android.' + methodName + ' is not available');
+  1037→  1037→                        return false;
+  1038→  1038→                    }
+  1039→  1039→                },
+  1040→  1040→            };
+  1041→  1041→            
+  1042→  1042→            // Perform initial status check
+  1043→  1043→            console.log('AndroidInterface polyfill loaded');
+  1044→  1044→            if (window.AndroidInterface.isAvailable()) {
+  1045→  1045→                console.log('✅ Android.showPayment is immediately available');
+  1046→  1046→            } else {
+  1047→  1047→                console.log('⚠️ Android.showPayment not yet available - retry logic will be used');
+  1048→  1048→                window.AndroidInterface.debugStatus();
+  1049→  1049→            }
+  1050→  1050→        })();
+  1051→  1051→    """.trimIndent()
+  1052→  1052→
+  1053→  1053→    Timber.tag(TAG).i("Injecting Android interface polyfill")
+  1054→  1054→    webView.evaluateJavascript(js) { result ->
+  1055→  1055→        Timber.tag(TAG).i("Android interface polyfill result: $result")
+  1056→  1056→    }
+  1057→  1057→}
+  1058→  1058→
+  1059→  1059→/**
+  1060→  1060→ * Verifies that the Android interface is properly loaded
+  1061→  1061→ */
+  1062→  1062→fun verifyAndroidInterface(webView: WebView) {
+  1063→  1063→    val js = """
+  1064→  1064→        (function() {
+  1065→  1065→            const status = {
+  1066→  1066→                androidExists: typeof window.Android !== 'undefined',
+  1067→  1067→                showPaymentExists: typeof window.Android !== 'undefined' && typeof window.Android.showPayment === 'function',
+  1068→  1068→                polyfillExists: typeof window.AndroidInterface !== 'undefined'
+  1069→  1069→            };
+  1070→  1070→            console.log('Android Interface Verification:', JSON.stringify(status));
+  1071→  1071→            return JSON.stringify(status);
+  1072→  1072→        })();
+  1073→  1073→    """.trimIndent()
+  1074→  1074→
+  1075→  1075→    Timber.tag(TAG).i("Verifying Android interface availability")
+  1076→  1076→    webView.evaluateJavascript(js) { result ->
+  1077→  1077→        Timber.tag(TAG).i("Android interface verification result: $result")
+  1078→  1078→    }
+  1079→  1079→}
+  1080→  1080→
+  1081→  1081→fun injectTheme(webView: WebView, theme: Int, mode: Int) {
+  1082→  1082→    val js = """
+  1083→  1083→        (function() {
+  1084→  1084→            function getLocalId() {
+  1085→  1085→                try {
+  1086→  1086→                    const url = window.location.href;
+  1087→  1087→                    const pathName = new URL(url).pathname;
+  1088→  1088→                    const match = pathName.match(/\/u\/(\d+)\//);
+  1089→  1089→                    return match ? match[1] : null;
+  1090→  1090→                } catch {
+  1091→  1091→                    return null;
+  1092→  1092→                }
+  1093→  1093→            }
+  1094→  1094→            
+  1095→  1095→            const localId = getLocalId();
+  1096→  1096→            const key = `lumo-settings${"$"}{localId === null ? '' : `:${"$"}{localId}`}`;
+  1097→  1097→            
+  1098→  1098→            const themeObj = {
+  1099→  1099→                theme: $theme,  // Int
+  1100→  1100→                mode: $mode     // Int
+  1101→  1101→            };
+  1102→  1102→
+  1103→  1103→            localStorage.setItem(key, JSON.stringify(themeObj));
+  1104→  1104→        })();
+  1105→  1105→    """.trimIndent()
+  1106→  1106→
+  1107→  1107→    webView.evaluateJavascript(js, null)
+  1108→  1108→}
+  1109→  1109→
+  1110→  1110→@Suppress("LongMethod")
+  1111→  1111→fun themeChangeListener(webView: WebView) {
+  1112→  1112→    val js = """
+  1113→  1113→        (function() {
+  1114→  1114→            let observedButtons = new WeakSet();
+  1115→  1115→
+  1116→  1116→            function extractThemeFromAriaLabel(ariaLabel) {
+  1117→  1117→                // "Use Light theme" -> "Light"
+  1118→  1118→                // "Use Dark theme" -> "Dark"
+  1119→  1119→                // "Use System theme" -> "System"
+  1120→  1120→                const match = ariaLabel?.match(/Use (\w+) theme/i);
+  1121→  1121→                return match ? match[1] : null;
+  1122→  1122→            }
+  1123→  1123→
+  1124→  1124→            function attachClickObserver(button) {
+  1125→  1125→                if (!button || observedButtons.has(button)) return;
+  1126→  1126→
+  1127→  1127→                observedButtons.add(button);
+  1128→  1128→                const ariaLabel = button.getAttribute("aria-label");
+  1129→  1129→                const theme = extractThemeFromAriaLabel(ariaLabel);
+  1130→  1130→
+  1131→  1131→                window.Android?.log("✅ Observing theme button: " + ariaLabel);
+  1132→  1132→
+  1133→  1133→                button.addEventListener('click', function() {
+  1134→  1134→                    const clickedTheme = extractThemeFromAriaLabel(this.getAttribute("aria-label"));
+  1135→  1135→                    window.Android?.log("🎯 Theme button clicked: " + clickedTheme);
+  1136→  1136→                    window.Android?.onThemeChanged(clickedTheme);
+  1137→  1137→                });
+  1138→  1138→            }
+  1139→  1139→
+  1140→  1140→            function findAndObserveThemeButtons() {
+  1141→  1141→                // Find all theme card buttons
+  1142→  1142→                const buttons = document.querySelectorAll('button.lumo-theme-card-button');
+  1143→  1143→
+  1144→  1144→                if (buttons.length > 0) {
+  1145→  1145→                    window.Android?.log("Found " + buttons.length + " theme buttons");
+  1146→  1146→                    buttons.forEach(attachClickObserver);
+  1147→  1147→                }
+  1148→  1148→            }
+  1149→  1149→
+  1150→  1150→            // Body observer to detect when theme buttons appear
+  1151→  1151→            const bodyObserver = new MutationObserver(mutations => {
+  1152→  1152→                for (const mutation of mutations) {
+  1153→  1153→                    for (const node of mutation.addedNodes) {
+  1154→  1154→                        if (!(node instanceof HTMLElement)) continue;
+  1155→  1155→
+  1156→  1156→                        // Case 1: the node itself is a theme button
+  1157→  1157→                        if (node.matches("button.lumo-theme-card-button")) {
+  1158→  1158→                            attachClickObserver(node);
+  1159→  1159→                        }
+  1160→  1160→
+  1161→  1161→                        // Case 2: theme buttons are inside the added node
+  1162→  1162→                        const buttons = node.querySelectorAll("button.lumo-theme-card-button");
+  1163→  1163→                        buttons.forEach(attachClickObserver);
+  1164→  1164→                    }
+  1165→  1165→                }
+  1166→  1166→            });
+  1167→  1167→
+  1168→  1168→            // Initial scan for existing buttons
+  1169→  1169→            findAndObserveThemeButtons();
+  1170→  1170→
+  1171→  1171→            bodyObserver.observe(document.body, {
+  1172→  1172→                childList: true,
+  1173→  1173→                subtree: true
+  1174→  1174→            });
+  1175→  1175→
+  1176→  1176→            window.Android?.log("Theme change listener initialized");
+  1177→  1177→        })();
+  1178→  1178→    """.trimIndent()
+  1179→  1179→    webView.evaluateJavascript(js, null)
+  1180→  1180→}
+  1181→  1181→
+  1182→  1182→fun themeStyleChangedListener(webView: WebView) {
+  1183→  1183→    val js = """
+  1184→  1184→        (function setupLumoThemeObserver() {
+  1185→  1185→            const IDS = ["lumo-dark-theme", "lumo-light-theme"];
+  1186→  1186→
+  1187→  1187→            function getActiveTheme() {
+  1188→  1188→                for (const id of IDS) {
+  1189→  1189→                    const el = document.getElementById(id);
+  1190→  1190→                    if (el) return id;
+  1191→  1191→                }
+  1192→  1192→                return "";
+  1193→  1193→            }
+  1194→  1194→
+  1195→  1195→            function notify(id) {
+  1196→  1196→                if (window.Android && typeof window.Android.onThemeStyleChanged === "function") {
+  1197→  1197→                    window.Android.onThemeStyleChanged(id);
+  1198→  1198→                }
+  1199→  1199→            }
+  1200→  1200→
+  1201→  1201→            const observer = new MutationObserver((mutations) => {
+  1202→  1202→                let dirty = false;
+  1203→  1203→
+  1204→  1204→                for (const m of mutations) {
+  1205→  1205→                    if (m.type === "childList") {
+  1206→  1206→                        const all = [...m.addedNodes, ...m.removedNodes];
+  1207→  1207→                        if (all.some(n => n.nodeType === 1 && IDS.includes(n.id))) {
+  1208→  1208→                            dirty = true;
+  1209→  1209→                            break;
+  1210→  1210→                        }
+  1211→  1211→                    }
+  1212→  1212→
+  1213→  1213→                    if (m.type === "attributes") {
+  1214→  1214→                        if (IDS.includes(m.target.id)) {
+  1215→  1215→                            dirty = true;
+  1216→  1216→                            break;
+  1217→  1217→                        }
+  1218→  1218→                    }
+  1219→  1219→                }
+  1220→  1220→
+  1221→  1221→                if (dirty) notify(getActiveTheme());
+  1222→  1222→            });
+  1223→  1223→
+  1224→  1224→            observer.observe(document.documentElement, {
+  1225→  1225→                childList: true,
+  1226→  1226→                subtree: true,
+  1227→  1227→                attributes: true,
+  1228→  1228→                attributeFilter: ["id"]
+  1229→  1229→            });
+  1230→  1230→
+  1231→  1231→            // initial fire
+  1232→  1232→            notify(getActiveTheme());
+  1233→  1233→        })();
+  1234→  1234→    """.trimIndent()
+  1235→  1235→    webView.evaluateJavascript(js, null)
+  1236→  1236→}
+  1237→  1237→
+  1238→  1238→/**
+  1239→  1239→ * Injects JavaScript to handle Black Friday 2025 promotion button clicks
+  1240→  1240→ */
+  1241→  1241→@Suppress("LongMethod")
+  1242→  1242→fun injectBF2025PromotionHandler(webView: WebView) {
+  1243→  1243→    val js = """
+  1244→  1244→        (function() {
+  1245→  1245→            try {
+  1246→  1246→                console.log('Setting up BF2025 promotion button click handlers');
+  1247→  1247→
+  1248→  1248→                // Function to attach click handlers to BF2025 promotion buttons
+  1249→  1249→                function attachBF2025ClickHandlers() {
+  1250→  1250→                    // Select all buttons with the BF2025 promotion classes
+  1251→  1251→                    const bf2025Buttons = document.querySelectorAll('.lumo-spring-sale-2026-free');
+  1252→  1252→
+  1253→  1253→                    if (bf2025Buttons.length > 0) {
+  1254→  1254→                        console.log('Found ' + bf2025Buttons.length + ' BF2025 promotion button(s)');
+  1255→  1255→
+  1256→  1256→                        // Add click handlers to each button
+  1257→  1257→                        bf2025Buttons.forEach((button, index) => {
+  1258→  1258→                            // Ensure we don't add multiple handlers to the same button
+  1259→  1259→                            if (!button.hasAttribute('data-bf2025-payment-handler')) {
+  1260→  1260→                                button.addEventListener('click', function(e) {
+  1261→  1261→                                    console.log('BF2025 promotion button clicked');
+  1262→  1262→                                    e.preventDefault();
+  1263→  1263→                                    e.stopPropagation();
+  1264→  1264→
+  1265→  1265→                                    if (window.Android && window.Android.showBlackFridaySale) {
+  1266→  1266→                                        // Fallback to direct call if polyfill not loaded
+  1267→  1267→                                        window.Android.showBlackFridaySale();
+  1268→  1268→                                    } else {
+  1269→  1269→                                        console.error('Android payment interface not available');
+  1270→  1270→                                        alert('Payment interface not available. Please refresh the page and try again.');
+  1271→  1271→                                    }
+  1272→  1272→                                    return false;
+  1273→  1273→                                });
+  1274→  1274→                                // Mark the button as having a handler
+  1275→  1275→                                button.setAttribute('data-bf2025-payment-handler', 'true');
+  1276→  1276→                                console.log('Added payment handler to BF2025 promotion button ' + (index + 1));
+  1277→  1277→                            }
+  1278→  1278→                        });
+  1279→  1279→                    } else {
+  1280→  1280→                        console.log('No BF2025 promotion buttons found yet');
+  1281→  1281→                    }
+  1282→  1282→                }
+  1283→  1283→
+  1284→  1284→                // Run immediately for any buttons that already exist
+  1285→  1285→                attachBF2025ClickHandlers();
+  1286→  1286→
+  1287→  1287→                // Set up a MutationObserver to watch for dynamically added buttons
+  1288→  1288→                if (!window._bf2025ButtonObserver) {
+  1289→  1289→                    const observer = new MutationObserver((mutations) => {
+  1290→  1290→                        let shouldCheckForButtons = false;
+  1291→  1291→
+  1292→  1292→                        for (const mutation of mutations) {
+  1293→  1293→                            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+  1294→  1294→                                shouldCheckForButtons = true;
+  1295→  1295→                                break;
+  1296→  1296→                            }
+  1297→  1297→                        }
+  1298→  1298→
+  1299→  1299→                        if (shouldCheckForButtons) {
+  1300→  1300→                            console.log('DOM changed, checking for new BF2025 promotion buttons');
+  1301→  1301→                            attachBF2025ClickHandlers();
+  1302→  1302→                        }
+  1303→  1303→                    });
+  1304→  1304→
+  1305→  1305→                    // Start observing the document body for DOM changes
+  1306→  1306→                    observer.observe(document.body, {
+  1307→  1307→                        childList: true,
+  1308→  1308→                        subtree: true
+  1309→  1309→                    });
+  1310→  1310→
+  1311→  1311→                    window._bf2025ButtonObserver = observer;
+  1312→  1312→                    console.log('BF2025 promotion button observer started');
+  1313→  1313→                }
+  1314→  1314→            } catch (e) {
+  1315→  1315→                console.error('Error setting up BF2025 promotion button handlers:', e);
+  1316→  1316→                console.error('Error stack:', e.stack);
+  1317→  1317→            }
+  1318→  1318→        })();
+  1319→  1319→    """.trimIndent()
+  1320→  1320→
+  1321→  1321→    Timber.tag(TAG).i("Injecting BF2025 promotion button handlers JavaScript")
+  1322→  1322→    webView.evaluateJavascript(js) { result ->
+  1323→  1323→        Timber.tag(TAG).i("BF2025 promotion button handler JS evaluation result: $result")
+  1324→  1324→    }
+  1325→  1325→}
+  1326→  1326→
+  1327→  1327→fun injectUpgradeLinkHider(webView: WebView) {
+  1328→  1328→    val js = """
+  1329→  1329→        (function() {
+  1330→  1330→            function removeUpgradeLinks() {
+  1331→  1331→                const links = document.querySelectorAll('a');
+  1332→  1332→                let removedCount = 0;
+  1333→  1333→
+  1334→  1334→                links.forEach(link => {
+  1335→  1335→                    const href = link.getAttribute('href')?.toLowerCase() || '';
+  1336→  1336→                    const text = link.textContent?.toLowerCase() || '';
+  1337→  1337→                    if (href.includes('upgrade') || text.includes('upgrade')) {
+  1338→  1338→                        link.remove();
+  1339→  1339→                        removedCount++;
+  1340→  1340→                    }
+  1341→  1341→                });
+  1342→  1342→
+  1343→  1343→                if (removedCount > 0) {
+  1344→  1344→                    console.log(`Removed ${'$'}{removedCount} upgrade link(s)`);
+  1345→  1345→                }
+  1346→  1346→
+  1347→  1347→                return removedCount > 0;
+  1348→  1348→            }
+  1349→  1349→
+  1350→  1350→            // Run immediately in case the link already exists
+  1351→  1351→            removeUpgradeLinks();
+  1352→  1352→
+  1353→  1353→            // Observe for dynamically loaded or re-rendered links
+  1354→  1354→            const observer = new MutationObserver((mutationsList) => {
+  1355→  1355→                for (const mutation of mutationsList) {
+  1356→  1356→                    if (mutation.addedNodes.length > 0) {
+  1357→  1357→                        removeUpgradeLinks();
+  1358→  1358→                        break;
+  1359→  1359→                    }
+  1360→  1360→                }
+  1361→  1361→            });
+  1362→  1362→
+  1363→  1363→            observer.observe(document.body, { childList: true, subtree: true });
+  1364→  1364→
+  1365→  1365→            console.log('Upgrade link hider observer registered');
+  1366→  1366→        })();
+  1367→  1367→    """.trimIndent()
+  1368→  1368→
+  1369→  1369→    Timber.tag(TAG).i("Injecting upgrade link hider JavaScript")
+  1370→  1370→    webView.evaluateJavascript(js, null)
+  1371→  1371→}
+  1372→  1372→
+  1373→  1373→fun injectSpokenText(
+  1374→  1374→    webView: WebView,
+  1375→  1375→    text: String,
+  1376→  1376→) {
+  1377→  1377→    val js = """
+  1378→  1378→        (function() {
+  1379→  1379→            if (typeof window.insertPromptAndSubmit === 'function') {
+  1380→  1380→                return window.insertPromptAndSubmit($text);
+  1381→  1381→            } else {
+  1382→  1382→                console.error('insertPromptAndSubmit function not found');
+  1383→  1383→                return 'Error: insertPromptAndSubmit not found';
+  1384→  1384→            }
+  1385→  1385→        })()
+  1386→  1386→    """.trimIndent()
+  1387→  1387→
+  1388→  1388→    Timber.tag(TAG).i("Injecting spoken text JavaScript")
+  1389→  1389→    webView.evaluateJavascript(js, null)
+  1390→  1390→}
+  1391→  1391→

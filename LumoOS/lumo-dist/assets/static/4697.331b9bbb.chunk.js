@@ -1,0 +1,2 @@
+"use strict";(globalThis.webpackChunkproton_lumo=globalThis.webpackChunkproton_lumo||[]).push([[4697],{54697(e,t,r){r.r(t);var a=r(47695);let n=async e=>{let t=new Worker(new URL(r.p+r.u(7851),r.b));try{let r=a.LV(t);return await r.init(e),await r.getLogs()}finally{t.terminate()}};r.d(t,["readLogsInWorker",0,n])}}]);
+//# sourceMappingURL=4697.331b9bbb.chunk.js.map
