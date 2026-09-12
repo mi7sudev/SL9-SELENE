@@ -130,7 +130,13 @@ function saveAdminConfig(cfg) {
 // every signed-in user's chats can use the enabled tools. Env secrets live
 // here and inside mcp-manager.cjs only — API responses expose `envKeys`,
 // never values. See MCP.md.
-const MAX_MCP_ROUNDS = 8;           // tool-call rounds per chat request
+// Tool-call rounds per chat request. 0 = unlimited: the loop runs until the
+// model stops calling tools, the client disconnects, or the upstream errors —
+// usage cost is the user's own control (own provider key). Set
+// LUMO_MAX_MCP_ROUNDS to a positive number to cap it again.
+const MAX_MCP_ROUNDS = Number(process.env.LUMO_MAX_MCP_ROUNDS) > 0
+    ? Number(process.env.LUMO_MAX_MCP_ROUNDS)
+    : 0;
 const MAX_MCP_TOOLS = 128;          // tool definitions advertised to the model
 const MAX_MCP_SCHEMA_BYTES = 262144; // sum of tool input schemas
 
@@ -2176,8 +2182,8 @@ async function runMcpChatLoop({ req, res, bodyObj, upstreamUrl, forwardHeaders, 
 
             const wantsTools = roundResult.toolCalls.length > 0
                 && (roundResult.finishReason === 'tool_calls' || roundResult.finishReason === 'stop');
-            if (!wantsTools || round >= MAX_MCP_ROUNDS) {
-                if (wantsTools && round >= MAX_MCP_ROUNDS) {
+            if (!wantsTools || (MAX_MCP_ROUNDS > 0 && round >= MAX_MCP_ROUNDS)) {
+                if (wantsTools && MAX_MCP_ROUNDS > 0 && round >= MAX_MCP_ROUNDS) {
                     mcpLog(`[MCP] round limit ${MAX_MCP_ROUNDS} reached; returning model output as-is`);
                     sendText('\n\n_MCP tool round limit reached; stopping here._');
                 }
