@@ -132,3 +132,22 @@ Stage Summary:
 - The agent can now use ANY MCP connection end-to-end from chat: register (lumo__server_add) -> credential (submit_key/connect) -> verify ready -> enable dormant write-classified tools (lumo__tool_permission, admin) -> call the tool (catalog hot-extends same-turn) -> real data answer, with honest classification-based governance preserved (dormant until opted in; refusal messages teach the model the remedy).
 - Root cause category to remember: any UI/control surface that shows the model tool NAMES that are not in its executable catalog invites fabricated text calls; visibility and callability must match (now enforced by usable flags + system note + remedy hints).
 - Also fixed: mcp-proxy test suite was silently broken by the previous session's LUMO_TEST guard (harness never set it) and the MAX_MCP_ROUNDS 5->10 bump (test still expected the 5-round contract); 63/63 now.
+
+---
+Task ID: toolcard-collapse-fix
+Agent: Z.ai Code (main)
+Task: Fix bug in tool-result traces: clicking "View tool result" expanded the result but the toggle button disappeared, leaving no way to hide it again (reported for service_lookup / connections_list / update_project / get_project cards).
+
+Work Log:
+- Located the renderer: the native tool-call timeline in vendored chunk lumo-dist/assets/static/5467.9c94b994.chunk.js. Root cause: in the MCP/custom-tool card branch (ec.sl predicate = name contains "__"), the "View tool result" button was rendered only while collapsed with onClick m(!0) (expand-only); once expanded, the details <pre> replaced the button. The adjacent generic "View details" branch already did it correctly (always-rendered toggle, m(!d), aria-expanded, rotating chevron).
+- NEW LumoOS/patch-toolcard-collapse.cjs (repo patch convention, idempotent, syntax-gated): mirrors the generic branch - button always rendered, m(!d), label flips "View tool result" <-> "Hide tool result", aria-expanded, chevron gets thinking-step-chevron + --expanded (both classes already in 5467.a3f1570a.ltr.css, rotate 180deg). Also re-signs the chunk SRI in ALL 13 runtime.*.js files, bumps the chunk URL ?v=15 -> ?v=16, re-bumps index.html's boot runtime tag + integrity, and runs two self-checks (all (runtime,chunk) SRI pairs + index.html boot tag).
+- Fixed diag-all-runtime-integrity.cjs: hardcoded D:/ProtoLumo path -> path.join(__dirname,'lumo-dist','assets','static') so the charter-required integrity gate actually runs here.
+- Two author bugs caught and fixed during development (self-checks proved their worth): (a) char class lost its + quantifier -> SRI replace silently no-op'd; (b) step 3 wrote index.html integrity WITHOUT the sha384- prefix -> boot SRI would fail. Script now tolerates/heals the prefix-less tag and self-check #5 fails the run if the boot tag is missing/mismatched.
+- Final state verified: node diag-all-runtime-integrity.cjs -> checked 1272, mismatches 0; boot tag runtime.1696e10d.js?v=61 integrity sha384-... valid; served chunk ?v=16 contains the fix.
+- E2E (agent-browser, admin chat, real LLM): "how many projects do we have in plane?" -> native cards Ran connections_list / Ran tool_permission / Ran project; expand -> button REMAINS as "Hide tool result" (expanded=true), result JSON renders; click again -> collapses (expanded=false); second card same; mobile 390x844 fine; console clean (only pre-existing vendor refreshSpaceFromRemote deserialization noise). Bonus: this run re-proved the Plane pipeline end-to-end (answer: 3 projects - SELENE-9 (SL-9), Homelab, DOST) and re-confirmed the GitHub-API tools:null connection is the known dormant/OAuth state.
+- Tests: 63/63 green (store 6, mcp-manager 17, mcp-connections 17, mcp-proxy 23). NOTE: `node --test tests/` (directory form) misreports as 1 failing test in this Node version - run per-file.
+- Repo hygiene: HEAD 6230be5 was broken (lumo-server.cjs referenced uncommitted agent-os/ + store.cjs lacked generated_tools) - committed the leftover agent-os phase-1 artifacts BEFORE the UI fix commit.
+
+Stage Summary:
+- Tool-result cards now fully collapsible: View tool result <-> Hide tool result toggle always visible, chevron rotates, aria-expanded tracked; verified on desktop + mobile in the real product with real MCP tool traces; vendor SRI chain intact (0 mismatches) and cache-busted (?v=16 chunk, ?v=61 boot runtime).
+- Artifacts: LumoOS/patch-toolcard-collapse.cjs (re-runnable), LumoOS/diag-all-runtime-integrity.cjs (now usable on Linux), screenshots tc-1..3 in /home/z/SL9-SELENE/.
